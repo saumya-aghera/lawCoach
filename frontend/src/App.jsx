@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_URL || "";
 
 // ─── Palette ───────────────────────────────────────────────────────────────
 // Single blue palette: navy text, slate grays, white backgrounds, blue accents

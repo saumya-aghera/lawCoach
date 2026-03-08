@@ -22,7 +22,8 @@ from google.genai import types
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import chromadb
@@ -763,3 +764,14 @@ def list_laws(state: Optional[str] = None, situation: Optional[str] = None):
     if state:     laws = [l for l in laws if l["state"] in (state,"federal")]
     if situation: laws = [l for l in laws if l["situation"] == situation]
     return {"count": len(laws), "laws": laws}
+
+
+# ── Serve React frontend (local dev + single-port deployment) ─────────────────
+_FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "frontend", "dist")
+
+if os.path.isdir(_FRONTEND_DIST):
+    app.mount("/assets", StaticFiles(directory=os.path.join(_FRONTEND_DIST, "assets")), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def serve_frontend(full_path: str):
+        return FileResponse(os.path.join(_FRONTEND_DIST, "index.html"))
