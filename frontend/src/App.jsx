@@ -49,6 +49,20 @@ const SPEAKER_META = {
   system:  { label:"System",  color:"#64748b", bg:"#f1f5f9" },
 };
 
+const LANGUAGES = [
+  { code: "en-US", label: "English",    gemini: "English"    },
+  { code: "es-ES", label: "Español",    gemini: "Spanish"    },
+  { code: "fr-FR", label: "Français",   gemini: "French"     },
+  { code: "de-DE", label: "Deutsch",    gemini: "German"     },
+  { code: "zh-CN", label: "中文",        gemini: "Chinese"    },
+  { code: "ar-SA", label: "العربية",    gemini: "Arabic"     },
+  { code: "hi-IN", label: "हिंदी",      gemini: "Hindi"      },
+  { code: "pt-BR", label: "Português",  gemini: "Portuguese" },
+  { code: "ru-RU", label: "Русский",    gemini: "Russian"    },
+  { code: "ja-JP", label: "日本語",     gemini: "Japanese"   },
+  { code: "ko-KR", label: "한국어",     gemini: "Korean"     },
+];
+
 const DOC_LABELS = {
   judicial_warrant:"Judicial Warrant", administrative_warrant:"Admin Warrant",
   summons:"Summons", traffic_ticket:"Traffic Ticket",
@@ -188,6 +202,7 @@ const apiAnalyzeVideo    = (video_base64, media_type, state, situation, descript
 const apiGenerateReport  = (body) =>
   fetch(`${API_BASE}/generate-report`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) })
     .then(r => { if(!r.ok) throw new Error(`${r.status}`); return r.blob(); });
+const apiTranslate = (text, target_lang) => post("/translate", { text, target_lang });
 
 // ─── Audio recorder hook ───────────────────────────────────────────────────
 function useRecorder() {
@@ -222,7 +237,7 @@ function useRecorder() {
 }
 
 // ─── Speech hook ───────────────────────────────────────────────────────────
-function useSpeech(onResult) {
+function useSpeech(onResult, lang = "en-US") {
   const ref = useRef(null);
   const [listening, setListening] = useState(false);
   const [supported, setSupported] = useState(true);
@@ -230,15 +245,30 @@ function useSpeech(onResult) {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) { setSupported(false); return; }
     const r = new SR();
-    r.continuous = true; r.interimResults = false; r.lang = "en-US";
+    r.continuous = true; r.interimResults = false; r.lang = lang;
     r.onresult = e => { const t = e.results[e.results.length-1][0].transcript.trim(); if(t) onResult(t); };
     r.onerror  = () => {};
     r.onend    = () => setListening(false);
     ref.current = r;
-  }, [onResult]);
+  }, [onResult, lang]);
   const start = useCallback(() => { ref.current?.start(); setListening(true); }, []);
   const stop  = useCallback(() => { ref.current?.stop();  setListening(false); }, []);
   return { listening, supported, start, stop };
+}
+
+// ─── Session management ────────────────────────────────────────────────────
+const SESSION_KEY = "lawaier_sessions";
+
+function loadSessions() {
+  try { return JSON.parse(localStorage.getItem(SESSION_KEY) || "[]"); } catch { return []; }
+}
+
+function saveSession(session) {
+  try {
+    const existing = loadSessions();
+    const updated  = [session, ...existing].slice(0, 20); // keep latest 20
+    localStorage.setItem(SESSION_KEY, JSON.stringify(updated));
+  } catch { /* localStorage unavailable */ }
 }
 
 // ─── Main App ──────────────────────────────────────────────────────────────
@@ -279,6 +309,12 @@ export default function App() {
 
   const { audioUrl, start: startRecording, stop: stopRecording, reset: resetRecording } = useRecorder();
 
+  const [userLang,       setUserLang]       = useState("en-US");
+  const [userSpeaking,   setUserSpeaking]   = useState(false);
+  const [translating,    setTranslating]    = useState(false);
+  const [sessions,       setSessions]       = useState(loadSessions);
+  const [showSessions,   setShowSessions]   = useState(false);
+
   const feedEndRef = useRef(null);
   useEffect(() => { feedEndRef.current?.scrollIntoView({ behavior:"smooth" }); }, [suggestions]);
   useEffect(() => {
@@ -286,30 +322,98 @@ export default function App() {
   }, []);
 
   // ── Speech ──────────────────────────────────────────────────────────────
-  const handleSpeech = useCallback(async (text) => {
+  const handleSpeech = useCallback(async (text, forceSpeaker = null) => {
     const ts = new Date().toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
-    const msg = { role:"user", content:`Spoken: "${text}"` };
+    const langInfo = LANGUAGES.find(l => l.code === userLang) || LANGUAGES[0];
+    const isTranslating = userLang !== "en-US";
+
+    // If user is speaking in their language, translate to English first for analysis
+    let analysisText = text;
+    let displayTranslated = null;
+
+    if (isTranslating && forceSpeaker === "you") {
+      setTranslating(true);
+      try {
+        const r = await apiTranslate(text, "English");
+        analysisText = r.translated || text;
+      } catch { /* use original */ }
+      setTranslating(false);
+    }
+
+    const msg = { role:"user", content:`Spoken: "${analysisText}"` };
     const h2  = [...history, msg];
     setHistory(h2);
-    if (isThinking) return;
+    if (isThinking && !forceSpeaker) return;
     setIsThinking(true);
     setError(null);
+
     try {
-      const res = await apiAnalyze(text, situation, stateCode, description, h2);
-      const speaker = res.speaker || "officer";
-      setTranscript(p => [...p, { text, ts, speaker }]);
+      const res = await apiAnalyze(analysisText, situation, stateCode, description, h2);
+      const speaker = forceSpeaker || res.speaker || "officer";
+
+      // If officer spoke and user has a non-English language, translate officer speech for display
+      if (isTranslating && speaker === "officer") {
+        setTranslating(true);
+        try {
+          const r = await apiTranslate(text, langInfo.gemini);
+          displayTranslated = r.translated;
+        } catch { /* fallback to original */ }
+        setTranslating(false);
+        // Speak translated text aloud via TTS
+        if (displayTranslated && window.speechSynthesis) {
+          const utt = new SpeechSynthesisUtterance(displayTranslated);
+          utt.lang = userLang;
+          utt.rate = 0.9;
+          window.speechSynthesis.speak(utt);
+        }
+      }
+
+      setTranscript(p => [...p, {
+        text: displayTranslated ? `${displayTranslated}` : text,
+        originalText: displayTranslated ? text : null,
+        ts,
+        speaker,
+        id: Date.now() + Math.random(),
+      }]);
+
       if (res.suggestion) {
         setHistory(p => [...p, { role:"assistant", content:JSON.stringify(res) }]);
         setSuggestions(p => [...p, { ...res, id:Date.now(), time:ts, trigger:text }]);
       }
     } catch {
-      setTranscript(p => [...p, { text, ts, speaker: "officer" }]);
+      setTranscript(p => [...p, { text, ts, speaker: forceSpeaker || "officer", id: Date.now() + Math.random() }]);
       setError("Analysis failed — check backend is running.");
     }
     setIsThinking(false);
-  }, [situation, stateCode, description, history, isThinking]);
+  }, [situation, stateCode, description, history, isThinking, userLang]);
 
-  const { listening, supported, start: startSpeech, stop: stopSpeech } = useSpeech(handleSpeech);
+  const { listening, supported, start: startSpeech, stop: stopSpeech } = useSpeech(handleSpeech, "en-US");
+
+  // One-shot recognition in the user's language
+  const handleUserSpeak = useCallback(() => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return;
+    const r = new SR();
+    r.lang = userLang;
+    r.continuous = false;
+    r.interimResults = false;
+    setUserSpeaking(true);
+    r.onresult = e => {
+      const t = e.results[0][0].transcript.trim();
+      if (t) handleSpeech(t, "you");
+    };
+    r.onerror = () => setUserSpeaking(false);
+    r.onend   = () => setUserSpeaking(false);
+    r.start();
+  }, [userLang, handleSpeech]);
+
+  const flipSpeaker = useCallback((id) => {
+    setTranscript(p => p.map(t =>
+      t.id === id
+        ? { ...t, speaker: t.speaker === "officer" ? "you" : t.speaker === "you" ? "officer" : t.speaker }
+        : t
+    ));
+  }, []);
 
   // ── Nav ─────────────────────────────────────────────────────────────────
   async function goToState() {
@@ -347,6 +451,22 @@ export default function App() {
   function stopListening() {
     stopSpeech();
     stopRecording();
+    // Save session to localStorage
+    const session = {
+      id: Date.now(),
+      situation,
+      sitLabel: SITUATIONS.find(s => s.id === situation)?.label || situation,
+      sitIcon:  SITUATIONS.find(s => s.id === situation)?.icon  || "⚖",
+      state: stateCode,
+      date: new Date().toLocaleDateString(),
+      time: new Date().toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}),
+      duration: startTime ? Math.floor((Date.now() - startTime) / 1000) : 0,
+      transcript: [...transcript],
+      suggestions: [...suggestions],
+      description,
+    };
+    saveSession(session);
+    setSessions(loadSessions());
     setScreen("s4_results");
     setActiveTab("suggestions");
   }
@@ -461,10 +581,82 @@ Thank you,
           )}
         </div>
         <div style={s.headerRight}>
+          {sessions.length > 0 && (
+            <button onClick={() => setShowSessions(p=>!p)} style={{
+              background:"none", border:`1px solid ${P.border}`, borderRadius:6,
+              padding:"4px 10px", fontSize:12, fontWeight:600, color:P.slate,
+              cursor:"pointer", fontFamily:"Inter, system-ui, sans-serif", marginRight:8,
+            }}>
+              History ({sessions.length})
+            </button>
+          )}
           <span style={{...s.statusDot, background: backendOk===null?P.slateXL : backendOk?P.green:P.red}} />
           <span style={s.statusText}>{backendOk===null?"connecting…":backendOk?"Connected":"Offline"}</span>
         </div>
       </header>
+
+      {/* ── SESSIONS PANEL ── */}
+      {showSessions && (
+        <div style={{
+          position:"fixed", top:0, right:0, bottom:0, width:360, maxWidth:"90vw",
+          background:P.white, boxShadow:"-4px 0 24px rgba(0,0,0,0.12)",
+          zIndex:1000, overflowY:"auto", padding:24,
+        }}>
+          <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20}}>
+            <div style={{fontSize:16, fontWeight:700, color:P.navy}}>Past Sessions</div>
+            <button onClick={() => setShowSessions(false)} style={{
+              background:"none", border:"none", fontSize:20, cursor:"pointer", color:P.slateL, lineHeight:1,
+            }}>×</button>
+          </div>
+          {sessions.length === 0 ? (
+            <div style={{color:P.slateL, fontSize:13}}>No past sessions yet.</div>
+          ) : sessions.map(sess => (
+            <div key={sess.id} style={{
+              border:`1px solid ${P.border}`, borderRadius:10, padding:14, marginBottom:12, background:P.bg,
+            }}>
+              <div style={{display:"flex", gap:8, alignItems:"center", marginBottom:6}}>
+                <span style={{fontSize:18}}>{sess.sitIcon}</span>
+                <div>
+                  <div style={{fontWeight:700, color:P.navy, fontSize:13}}>{sess.sitLabel} · {sess.state}</div>
+                  <div style={{fontSize:11, color:P.slateL}}>{sess.date} at {sess.time}</div>
+                </div>
+              </div>
+              <div style={{display:"flex", gap:8, flexWrap:"wrap", marginBottom:8}}>
+                <span style={{fontSize:11, background:P.blueBg, color:P.blue, borderRadius:4, padding:"2px 8px", fontWeight:600}}>
+                  {sess.transcript?.filter(t=>t.speaker!=="system").length || 0} exchanges
+                </span>
+                <span style={{fontSize:11, background:P.redBg, color:P.red, borderRadius:4, padding:"2px 8px", fontWeight:600}}>
+                  {sess.suggestions?.filter(s=>s.urgency==="red").length || 0} critical
+                </span>
+                <span style={{fontSize:11, background:P.amberBg, color:P.amber, borderRadius:4, padding:"2px 8px", fontWeight:600}}>
+                  {Math.floor((sess.duration||0)/60)}m {(sess.duration||0)%60}s
+                </span>
+              </div>
+              {sess.transcript && sess.transcript.filter(t=>t.speaker!=="system").slice(0,2).map((t,i) => {
+                const sp = SPEAKER_META[t.speaker] || SPEAKER_META.officer;
+                return (
+                  <div key={i} style={{fontSize:11, color:P.slate, marginBottom:3, display:"flex", gap:6}}>
+                    <span style={{background:sp.bg, color:sp.color, borderRadius:3, padding:"1px 5px", fontWeight:700, flexShrink:0}}>{sp.label}</span>
+                    <span style={{overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>"{t.text}"</span>
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+          <button onClick={() => {
+            if (window.confirm("Delete all session history?")) {
+              localStorage.removeItem(SESSION_KEY);
+              setSessions([]);
+            }
+          }} style={{
+            marginTop:8, padding:"8px 16px", border:`1px solid ${P.redBd}`, borderRadius:6,
+            background:P.redBg, color:P.red, fontSize:12, fontWeight:600, cursor:"pointer",
+            fontFamily:"Inter, system-ui, sans-serif", width:"100%",
+          }}>
+            Clear All History
+          </button>
+        </div>
+      )}
 
       {/* ── STEP BAR (steps 1-4 only on setup screens) ── */}
       {(screen==="s1_situation"||screen==="s2_state") && (
@@ -551,6 +743,34 @@ Thank you,
                 value={description} onChange={e => setDescription(e.target.value)} />
             </div>
 
+            {/* Language selector */}
+            <div style={s.descSection}>
+              <label style={s.label}>
+                My language <span style={{color:P.slateL}}>(for international travelers)</span>
+              </label>
+              <div style={{display:"flex", flexWrap:"wrap", gap:8, marginTop:8}}>
+                {LANGUAGES.map(lang => (
+                  <button key={lang.code}
+                    style={{
+                      padding:"6px 14px", borderRadius:20, fontSize:13, fontWeight:600, cursor:"pointer",
+                      border: `1.5px solid ${userLang===lang.code ? P.blue : P.border}`,
+                      background: userLang===lang.code ? P.blueBg : P.white,
+                      color: userLang===lang.code ? P.blue : P.slate,
+                      fontFamily:"Inter, system-ui, sans-serif",
+                    }}
+                    onClick={() => setUserLang(lang.code)}>
+                    {lang.label}
+                  </button>
+                ))}
+              </div>
+              {userLang !== "en-US" && (
+                <div style={{marginTop:8, fontSize:12, color:P.slate, background:P.blueBg, borderRadius:6, padding:"8px 12px"}}>
+                  Officer speech will be translated to {LANGUAGES.find(l=>l.code===userLang)?.label} and spoken aloud.
+                  Use the "Speak" button during the session to capture your voice in {LANGUAGES.find(l=>l.code===userLang)?.label}.
+                </div>
+              )}
+            </div>
+
             {error && <ErrBanner msg={error} />}
 
             <button style={{...s.primaryBtn, opacity:!stateCode||preparing?0.5:1}}
@@ -570,11 +790,28 @@ Thank you,
                 <div style={s.listenTitle}>
                   <span style={s.liveDot} className="pulse" />
                   <span style={{fontSize:15,fontWeight:600,color:P.navy}}>Listening Live</span>
-                  {isThinking && <span style={s.thinkingBadge}>analyzing…</span>}
+                  {(isThinking || translating) && <span style={s.thinkingBadge}>{translating?"translating…":"analyzing…"}</span>}
                 </div>
-                <div style={s.listenSub}>{sitInfo?.label} · {stateCode}</div>
+                <div style={s.listenSub}>
+                  {sitInfo?.label} · {stateCode}
+                  {userLang !== "en-US" && ` · ${LANGUAGES.find(l=>l.code===userLang)?.label}`}
+                </div>
               </div>
-              <button style={s.stopBtn} onClick={stopListening}>Stop Session</button>
+              <div style={{display:"flex", gap:8, alignItems:"center"}}>
+                {userLang !== "en-US" && (
+                  <button
+                    style={{
+                      background: userSpeaking ? P.blue : P.blueBg,
+                      border: `1.5px solid ${P.blue}`,
+                      borderRadius:8, padding:"8px 14px", color: userSpeaking ? P.white : P.blue,
+                      fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"Inter, system-ui, sans-serif",
+                    }}
+                    onClick={handleUserSpeak} disabled={userSpeaking}>
+                    {userSpeaking ? "🎙 Listening…" : `🎙 Speak (${LANGUAGES.find(l=>l.code===userLang)?.label})`}
+                  </button>
+                )}
+                <button style={s.stopBtn} onClick={stopListening}>Stop Session</button>
+              </div>
             </div>
 
             {error && <ErrBanner msg={error} />}
@@ -596,10 +833,18 @@ Thank you,
                 {transcript.slice(-5).map((t,i) => {
                   const sp = SPEAKER_META[t.speaker] || SPEAKER_META.officer;
                   return (
-                    <div key={i} style={s.transcriptLine}>
+                    <div key={t.id||i} style={s.transcriptLine}>
                       <span style={s.transcriptTime}>{t.ts}</span>
-                      <span style={{...s.speakerBadge, background: sp.bg, color: sp.color}}>{sp.label}</span>
-                      <span style={{color:P.slate, flex:1}}>&ldquo;{t.text}&rdquo;</span>
+                      <button
+                        onClick={() => t.id && flipSpeaker(t.id)}
+                        title="Click to flip speaker"
+                        style={{...s.speakerBadge, background: sp.bg, color: sp.color, border:"none", cursor: t.id?"pointer":"default"}}>
+                        {sp.label}
+                      </button>
+                      <span style={{color:P.slate, flex:1}}>
+                        &ldquo;{t.text}&rdquo;
+                        {t.originalText && <span style={{color:P.slateL, fontSize:11}}> ({t.originalText})</span>}
+                      </span>
                     </div>
                   );
                 })}
@@ -737,15 +982,22 @@ Thank you,
                     {transcript.map((t, i) => {
                       const sp = SPEAKER_META[t.speaker] || SPEAKER_META.officer;
                       return (
-                        <div key={i} style={{
+                        <div key={t.id||i} style={{
                           display:"flex", gap:12, padding:"10px 0",
                           borderBottom: i < transcript.length-1 ? `1px solid ${P.border}` : "none",
                           alignItems:"flex-start",
                         }}>
                           <span style={{color:P.slateL, fontSize:11, flexShrink:0, paddingTop:2}}>{t.ts}</span>
-                          <span style={{...s.speakerBadge, background:sp.bg, color:sp.color, flexShrink:0}}>{sp.label}</span>
+                          <button
+                            onClick={() => t.id && flipSpeaker(t.id)}
+                            title="Click to flip speaker"
+                            style={{...s.speakerBadge, background:sp.bg, color:sp.color, flexShrink:0, border:"none", cursor: t.id?"pointer":"default"}}>
+                            {sp.label}
+                          </button>
                           <span style={{color:P.navy, fontSize:14, lineHeight:1.5}}>
-                            {t.speaker === "system" ? <em style={{color:P.slate}}>{t.text}</em> : `"${t.text}"`}
+                            {t.speaker === "system"
+                              ? <em style={{color:P.slate}}>{t.text}</em>
+                              : <>{`"${t.text}"`}{t.originalText && <span style={{color:P.slateL, fontSize:12, display:"block"}}>Original: {t.originalText}</span>}</>}
                           </span>
                         </div>
                       );

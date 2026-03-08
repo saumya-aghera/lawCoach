@@ -107,6 +107,10 @@ class ReportRequest(BaseModel):
     doc_findings: list[dict] = []
     duration_seconds: int = 0
 
+class TranslateRequest(BaseModel):
+    text: str
+    target_lang: str  # e.g. "Spanish", "French"
+
 
 # ── Law search (keyword-based, no local ML models needed) ─────────────────
 def query_laws(query: str, state: str, situation: str, n: int = 5) -> list[dict]:
@@ -299,6 +303,19 @@ def health():
 def prepare(req: PrepareRequest):
     laws = query_laws(req.description, req.state, req.situation)
     return {"laws": laws}
+
+
+@app.post("/translate")
+async def translate_text(req: TranslateRequest):
+    """Translate text to target language using Gemini."""
+    system = (
+        f"You are a precise, literal translator. "
+        f"Translate the following text to {req.target_lang}. "
+        f"Output ONLY the translated text — no explanations, no quotes."
+    )
+    msgs = [{"role": "user", "content": req.text}]
+    result = await call_ai(system, msgs, max_tokens=400)
+    return {"translated": result.strip()}
 
 
 @app.post("/analyze")
