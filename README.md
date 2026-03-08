@@ -2,6 +2,8 @@
 
 Real-time AI legal rights coaching for law enforcement encounters. The app listens live, translates officer speech for non-English speakers, scans warrants and tickets, analyzes video footage, and generates attorney-ready PDF reports — all powered by **Google Gemini 2.0 Flash via Vertex AI**.
 
+# Team Members 
+Saumya Aghera, Parikshit Pawde
 ---
 
 ## Features
