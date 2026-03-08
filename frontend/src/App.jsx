@@ -209,21 +209,25 @@ const apiTranscribeAnalyze = (audio_base64, media_type, situation, state, descri
 
 
 // ─── Audio capture hook (Gemini-based, replaces Web Speech API) ────────────
-// FIX: We stop+restart MediaRecorder every 4s so each chunk is a COMPLETE,
-// self-contained audio file. Using timeslice(4000) produces WebM fragments —
-// only the first chunk has the header, subsequent ones are broken → Gemini 400.
+// Analysis recorder: stop+restart every 4s → each chunk is a COMPLETE self-contained
+// WebM so Gemini gets a valid file (timeslice fragments miss the header → 400 error).
+// Full recording recorder: runs continuously with timeslice → single valid WebM stream
+// where only the first chunk has the EBML header; all chunks concatenate cleanly.
 function useAudioCapture(onChunk) {
-  const streamRef  = useRef(null);
-  const activeRef  = useRef(false);
-  const allBlobs   = useRef([]);
-  const onChunkRef = useRef(onChunk);
-  const timerRef   = useRef(null);
-  const [capturing, setCapturing] = useState(false);
-  const [supported, setSupported] = useState(true);
-  const [audioUrl,  setAudioUrl]  = useState(null);
+  const streamRef    = useRef(null);
+  const activeRef    = useRef(false);
+  const onChunkRef   = useRef(onChunk);
+  const timerRef     = useRef(null);
+  const mrRef        = useRef(null);   // active analysis recorder (stop+restart)
+  const fullMrRef    = useRef(null);   // full-session recorder (continuous)
+  const fullChunks   = useRef([]);     // raw chunks from the full recorder
+  const [capturing,  setCapturing]  = useState(false);
+  const [supported,  setSupported]  = useState(true);
+  const [audioUrl,   setAudioUrl]   = useState(null);
 
   useEffect(() => { onChunkRef.current = onChunk; }, [onChunk]);
 
+  // ── Analysis recorder: stop+restart every 4 s ────────────────────────────
   const recordWindow = useCallback((stream, mimeType, baseType) => {
     if (!activeRef.current) return;
 
@@ -231,12 +235,13 @@ function useAudioCapture(onChunk) {
     let mr;
     try { mr = new MediaRecorder(stream, { mimeType }); }
     catch { mr = new MediaRecorder(stream); }
+    mrRef.current = mr;
 
     mr.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
 
     mr.onstop = () => {
+      mrRef.current = null;
       const blob = new Blob(chunks, { type: baseType });
-      allBlobs.current.push(blob);
 
       if (blob.size > 1500 && activeRef.current) {
         const reader = new FileReader();
@@ -250,12 +255,8 @@ function useAudioCapture(onChunk) {
       if (activeRef.current) {
         timerRef.current = setTimeout(() => recordWindow(stream, mimeType, baseType), 100);
       } else {
-        if (allBlobs.current.length > 0) {
-          const full = new Blob(allBlobs.current, { type: baseType });
-          setAudioUrl(URL.createObjectURL(full));
-        }
-        stream.getTracks().forEach(t => t.stop());
-        setCapturing(false);
+        // Analysis recorder done — now stop the full recorder to flush its chunks
+        try { fullMrRef.current?.stop(); } catch {}
       }
     };
 
@@ -265,7 +266,7 @@ function useAudioCapture(onChunk) {
 
   const start = useCallback(async () => {
     setAudioUrl(null);
-    allBlobs.current = [];
+    fullChunks.current = [];
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
@@ -277,6 +278,25 @@ function useAudioCapture(onChunk) {
                                                                    "audio/ogg";
       const baseType = mimeType.split(";")[0];
 
+      // ── Full-session recorder (continuous timeslice → valid single WebM) ──
+      let fullMr;
+      try { fullMr = new MediaRecorder(stream, { mimeType }); }
+      catch { fullMr = new MediaRecorder(stream); }
+      fullMrRef.current = fullMr;
+
+      fullMr.ondataavailable = (e) => { if (e.data.size > 0) fullChunks.current.push(e.data); };
+      fullMr.onstop = () => {
+        fullMrRef.current = null;
+        if (fullChunks.current.length > 0) {
+          const full = new Blob(fullChunks.current, { type: baseType });
+          setAudioUrl(URL.createObjectURL(full));
+        }
+        stream.getTracks().forEach(t => t.stop());
+        setCapturing(false);
+      };
+      fullMr.start(1000); // collect a chunk every second
+
+      // ── Analysis recorder (stop+restart loop) ────────────────────────────
       activeRef.current = true;
       setCapturing(true);
       recordWindow(stream, mimeType, baseType);
@@ -288,9 +308,14 @@ function useAudioCapture(onChunk) {
   const stop = useCallback(() => {
     activeRef.current = false;
     clearTimeout(timerRef.current);
+    // Stop the analysis recorder; its onstop will then stop the full recorder
+    try { mrRef.current?.stop(); } catch {
+      // If analysis recorder isn't running, stop full recorder directly
+      try { fullMrRef.current?.stop(); } catch {}
+    }
   }, []);
 
-  const reset = useCallback(() => { setAudioUrl(null); allBlobs.current = []; }, []);
+  const reset = useCallback(() => { setAudioUrl(null); fullChunks.current = []; }, []);
 
   return { capturing, supported, audioUrl, start, stop, reset };
 }
@@ -411,6 +436,8 @@ export default function App() {
 
   // ── Audio chunk handler — sends via WebSocket (persistent connection) ──────
   const handleChunk = useCallback((audio_base64, media_type) => {
+    // Drop chunk if TTS is currently speaking — prevents self-listening feedback loop
+    if (window.speechSynthesis?.speaking) return;
     if (isThinkingRef.current) return;
     setIsThinking(true);
     setError(null);
@@ -448,13 +475,6 @@ export default function App() {
     setTranscript([{ text: announcement, ts, speaker: "system" }]);
     setStartTime(Date.now());
 
-    // Announce via text-to-speech
-    if (window.speechSynthesis) {
-      const utt = new SpeechSynthesisUtterance(announcement);
-      utt.rate = 0.95;
-      window.speechSynthesis.speak(utt);
-    }
-
     // Open WebSocket session (replaces per-chunk HTTP POST)
     const multilingual = userLang !== "en-US";
     connectSession({
@@ -464,7 +484,15 @@ export default function App() {
       user_lang: multilingual ? userLang.split("-")[0] : "en",
     });
 
-    startCapture();    // starts MediaRecorder + audio chunk loop
+    // Announce via text-to-speech, then start recording after it finishes
+    if (window.speechSynthesis) {
+      const utt = new SpeechSynthesisUtterance(announcement);
+      utt.rate = 0.95;
+      utt.onend = () => startCapture();
+      window.speechSynthesis.speak(utt);
+    } else {
+      startCapture();
+    }
     setScreen("s3_listening");
   }
 
