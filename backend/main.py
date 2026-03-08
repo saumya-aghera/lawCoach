@@ -56,8 +56,16 @@ GEMINI_MODEL = "gemini-2.0-flash"
 PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
 LOCATION   = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
 
-# Vertex AI client — same pattern as way-back-home solutions
-_genai_client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
+# Vertex AI client — lazy-initialized so ADC credentials are resolved at call time
+_genai_client: genai.Client | None = None
+
+def get_client() -> genai.Client:
+    global _genai_client
+    if _genai_client is None:
+        project = os.environ.get("GOOGLE_CLOUD_PROJECT", PROJECT_ID)
+        location = os.environ.get("GOOGLE_CLOUD_LOCATION", LOCATION)
+        _genai_client = genai.Client(vertexai=True, project=project, location=location)
+    return _genai_client
 
 # ── Laws DB (loaded once) ─────────────────────────────────────────────────
 _laws_cache: list[dict] = []
@@ -168,7 +176,7 @@ async def call_ai(system: str, messages: list[dict], max_tokens: int = 1000,
                     types.Content(role=role, parts=[types.Part.from_text(text=text)])
                 )
 
-    response = await _genai_client.aio.models.generate_content(
+    response = await get_client().aio.models.generate_content(
         model=GEMINI_MODEL,
         contents=contents,
         config=config,
