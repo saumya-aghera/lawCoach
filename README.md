@@ -1,5 +1,5 @@
 # ⚖️ AI Law Coach — v2
-### RAG + Vision + PDF Reports | Google Cloud x Columbia Hackathon
+### RAG + Vision + PDF Reports 
 
 Real-time legal rights coaching. Listens to conversations, scans legal
 documents with AI vision, and generates post-encounter legal PDF reports.
@@ -39,35 +39,6 @@ law-coach/
 
 ---
 
-## Setup — Do This TONIGHT
-
-```bash
-# Terminal 1: Backend
-cd backend
-pip install -r requirements.txt
-cp .env.example .env            # add ANTHROPIC_API_KEY
-python build_chromadb.py        # one-time, ~30 seconds
-python query_test.py            # verify RAG works
-uvicorn main:app --reload --port 8000
-
-# Terminal 2: Frontend
-cd frontend
-npm install && npm run dev      # → http://localhost:3000
-```
-
-Verify: header shows green dot, go through all 4 screens, test camera scan and PDF report.
-
----
-
-## Hackathon Day — 3 Swaps
-
-All marked `# HACKATHON_DAY` in main.py.
-
-1. TEXT: In call_ai(), replace httpx block with `genai.Client` + `gemini-2.0-flash`
-2. VISION: Same call_ai(), image branch → `types.Part.from_bytes` + Gemini Flash
-3. LIVE AUDIO: Uncomment WebSocket block at bottom of main.py
-
----
 
 ## Architecture
 
