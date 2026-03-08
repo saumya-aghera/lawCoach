@@ -1,12 +1,14 @@
 # LawAIer - Backend Dependencies
-# No local ML models — all AI (embeddings + generation) via Google Vertex AI
 
 # API server
 fastapi==0.115.0
 uvicorn[standard]==0.30.0
 
-# Google Gemini / Vertex AI
+# Google Gemini / Vertex AI (raw generation + embeddings)
 google-genai>=1.0.0
+
+# Google Agent Development Kit — live audio streaming + tool orchestration
+google-adk
 
 # Vector DB — in-memory ChromaDB, embeddings via Vertex AI text-embedding-004
 chromadb>=0.5.0

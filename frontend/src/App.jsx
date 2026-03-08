@@ -404,20 +404,11 @@ export default function App() {
     setError(null);
   }, [userLang]);
 
-  // ── WebSocket session hook ─────────────────────────────────────────────────
-  const { wsStatus, connectSession, sendAudio, disconnectSession } = useSessionSocket({
+  // ── ADK WebSocket session hook ─────────────────────────────────────────────
+  // recording: true while PCM16 audio is streaming to the ADK agent
+  const { wsStatus, recording, connectSession, disconnectSession } = useSessionSocket({
     onAnalysis: handleAnalysisResult,
   });
-
-  // ── Audio chunk handler — sends via WebSocket (persistent connection) ──────
-  const handleChunk = useCallback((audio_base64, media_type) => {
-    if (isThinkingRef.current) return;
-    setIsThinking(true);
-    setError(null);
-    sendAudio(audio_base64, media_type);
-  }, [sendAudio]);
-
-  const { capturing, supported, audioUrl, start: startCapture, stop: stopCapture, reset: resetAudio } = useAudioCapture(handleChunk);
 
   const flipSpeaker = useCallback((id) => {
     setTranscript(p => p.map(t =>
@@ -444,7 +435,6 @@ export default function App() {
     setSuggestions([]);
     setHistory([]);
     setDocFindings([]); setScanResult(null); setVideoResult(null);
-    resetAudio();
     setTranscript([{ text: announcement, ts, speaker: "system" }]);
     setStartTime(Date.now());
 
@@ -464,13 +454,12 @@ export default function App() {
       user_lang: multilingual ? userLang.split("-")[0] : "en",
     });
 
-    startCapture();    // starts MediaRecorder + audio chunk loop
+    // connectSession opens WS → sends init → on "ready" the hook starts PCM16 recording
     setScreen("s3_listening");
   }
 
   function stopListening() {
-    stopCapture();
-    disconnectSession();
+    disconnectSession(); // stops recorder + closes WS
     // Save session to localStorage
     const session = {
       id: Date.now(),
@@ -496,7 +485,6 @@ export default function App() {
     setSuggestions([]); setTranscript([]); setHistory([]);
     setDocFindings([]); setScanResult(null);
     setVideoResult(null); setVideoName("");
-    resetAudio();
     setError(null); setReportReady(false); setShowLawyers(false);
     setScreen("s1_situation");
   }
@@ -861,7 +849,7 @@ Thank you,
               </div>
             )}
 
-            {!supported && (
+            {wsStatus === "ERROR" && (
               <div style={{...s.errBanner, marginTop:12}}>
                 Microphone access is required. Please allow microphone permission and refresh the page.
               </div>
@@ -926,23 +914,13 @@ Thank you,
                   : <span style={s.actionCta}>{reportReady?"Download Again →":"Generate PDF →"}</span>}
               </button>
 
-              {/* Download Recording */}
-              {audioUrl ? (
-                <a href={audioUrl} download={`lawaier-recording-${Date.now()}.webm`}
-                  style={{...s.actionCard, textDecoration:"none"}} className="actionCard">
-                  <span style={s.actionIcon}>🎙</span>
-                  <span style={s.actionTitle}>Download Recording</span>
-                  <span style={s.actionDesc}>Audio recording of the full encounter saved to your device</span>
-                  <span style={s.actionCta}>Save Audio →</span>
-                </a>
-              ) : (
-                <div style={{...s.actionCard, opacity:0.4, cursor:"default"}}>
-                  <span style={s.actionIcon}>🎙</span>
-                  <span style={s.actionTitle}>Recording</span>
-                  <span style={s.actionDesc}>Audio recording was not available (mic permission required)</span>
-                  <span style={s.actionCta}>Not available</span>
-                </div>
-              )}
+              {/* Live Streaming Info */}
+              <div style={{...s.actionCard, opacity:0.6, cursor:"default"}}>
+                <span style={s.actionIcon}>🎙</span>
+                <span style={s.actionTitle}>Live Streaming</span>
+                <span style={s.actionDesc}>Audio was streamed in real-time to the AI — no local recording saved</span>
+                <span style={s.actionCta}>ADK Live Session</span>
+              </div>
 
               {/* Find Lawyer */}
               <button style={s.actionCard} className="actionCard"

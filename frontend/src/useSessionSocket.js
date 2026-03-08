@@ -1,6 +1,24 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+/**
+ * useSessionSocket.js
+ * ===================
+ * WebSocket hook for the ADK-powered live coaching session.
+ *
+ * Lifecycle:
+ *   connectSession(ctx) → opens WS → sends init → receives "ready"
+ *                       → starts PCM16 audio recorder
+ *                       → each audio frame sent as { type:"audio", data:base64 }
+ *   server streams back { type:"analysis", ... } events
+ *   disconnectSession() → stops recorder + closes WS
+ *
+ * The server (main.py ws_session) runs the ADK Runner, which:
+ *   1. Forwards PCM16 audio to the Gemini Live API
+ *   2. The legal_coach agent transcribes, calls search_laws, produces JSON
+ *   3. Parses the JSON and forwards { type:"analysis", ... } to this client
+ */
 
-// Derive WS base URL from VITE_API_URL or current host
+import { useState, useRef, useCallback, useEffect } from "react";
+import { AudioRecorder } from "./audioRecorder";
+
 function getWsBase() {
   const apiUrl = import.meta.env.VITE_API_URL;
   if (apiUrl) return apiUrl.replace(/^http/, "ws");
@@ -9,43 +27,45 @@ function getWsBase() {
 }
 
 /**
- * Persistent WebSocket hook for lawCoach audio analysis.
- *
- * Usage:
- *   const { wsStatus, connectSession, sendAudio, disconnectSession } = useSessionSocket({ onAnalysis });
- *
- * @param {object} opts
- * @param {function} opts.onAnalysis - called with the full analysis JSON when a result arrives
+ * @param {{ onAnalysis: (result: object) => void }} opts
  */
 export function useSessionSocket({ onAnalysis }) {
-  const [wsStatus, setWsStatus] = useState("DISCONNECTED");
-  const ws = useRef(null);
+  const [wsStatus,  setWsStatus]  = useState("DISCONNECTED");
+  const [recording, setRecording] = useState(false);
+
+  const ws            = useRef(null);
+  const recorder      = useRef(new AudioRecorder(16000));
   const onAnalysisRef = useRef(onAnalysis);
 
-  // Keep ref in sync so onAnalysis closure captures latest state without reconnect
+  // Keep callback ref fresh without triggering reconnects
   useEffect(() => { onAnalysisRef.current = onAnalysis; }, [onAnalysis]);
 
-  const disconnectSession = useCallback(() => {
-    if (ws.current) {
-      ws.current.close();
-      ws.current = null;
-    }
-    setWsStatus("DISCONNECTED");
+  const _stopRecorder = useCallback(() => {
+    recorder.current.stop();
+    setRecording(false);
   }, []);
 
+  const disconnectSession = useCallback(() => {
+    _stopRecorder();
+    ws.current?.close();
+    ws.current = null;
+    setWsStatus("DISCONNECTED");
+  }, [_stopRecorder]);
+
   /**
-   * Open the WebSocket and send an init message with session context.
+   * Open the WebSocket and send session context.
+   * Audio recording starts automatically once the server replies "ready".
+   *
    * @param {{ situation, state, description, user_lang }} sessionCtx
    */
   const connectSession = useCallback((sessionCtx) => {
-    // If already open just re-init the session context on the server
+    // Re-init an already-open connection
     if (ws.current?.readyState === WebSocket.OPEN) {
       ws.current.send(JSON.stringify({ type: "init", ...sessionCtx }));
       return;
     }
 
-    const url = `${getWsBase()}/ws/session`;
-    const socket = new WebSocket(url);
+    const socket = new WebSocket(`${getWsBase()}/ws/session`);
     ws.current = socket;
     setWsStatus("CONNECTING");
 
@@ -54,7 +74,34 @@ export function useSessionSocket({ onAnalysis }) {
       socket.send(JSON.stringify({ type: "init", ...sessionCtx }));
     };
 
+    socket.onmessage = async (event) => {
+      let msg;
+      try { msg = JSON.parse(event.data); }
+      catch { return; }
+
+      if (msg.type === "ready") {
+        // Server has created the ADK session — start streaming PCM16 audio
+        try {
+          await recorder.current.start((base64Audio) => {
+            if (socket.readyState === WebSocket.OPEN) {
+              socket.send(JSON.stringify({ type: "audio", data: base64Audio }));
+            }
+          });
+          setRecording(true);
+        } catch (err) {
+          console.error("[useSessionSocket] Microphone error:", err);
+        }
+
+      } else if (msg.type === "analysis") {
+        onAnalysisRef.current?.(msg);
+
+      } else if (msg.type === "error") {
+        console.error("[useSessionSocket] Server error:", msg.message);
+      }
+    };
+
     socket.onclose = () => {
+      _stopRecorder();
       setWsStatus("DISCONNECTED");
       ws.current = null;
     };
@@ -63,35 +110,10 @@ export function useSessionSocket({ onAnalysis }) {
       console.error("[useSessionSocket] WebSocket error:", err);
       setWsStatus("ERROR");
     };
+  }, [_stopRecorder]);
 
-    socket.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        if (msg.type === "analysis") {
-          onAnalysisRef.current?.(msg);
-        } else if (msg.type === "error") {
-          console.error("[useSessionSocket] Server error:", msg.message);
-        }
-        // "ready" and "translation" are handled by callers if needed
-      } catch (e) {
-        console.error("[useSessionSocket] Failed to parse message:", e);
-      }
-    };
-  }, []);
-
-  /**
-   * Send an audio chunk for transcription + analysis.
-   * @param {string} audio_base64 - base64-encoded audio blob
-   * @param {string} media_type   - e.g. "audio/webm"
-   */
-  const sendAudio = useCallback((audio_base64, media_type) => {
-    if (ws.current?.readyState === WebSocket.OPEN) {
-      ws.current.send(JSON.stringify({ type: "audio", data: audio_base64, media_type }));
-    }
-  }, []);
-
-  // Cleanup on unmount
+  // Clean up on unmount
   useEffect(() => () => disconnectSession(), [disconnectSession]);
 
-  return { wsStatus, connectSession, sendAudio, disconnectSession };
+  return { wsStatus, recording, connectSession, disconnectSession };
 }

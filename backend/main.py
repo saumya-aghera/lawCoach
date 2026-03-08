@@ -1,11 +1,12 @@
 """
-LawAIer - FastAPI Backend v2
+LawAIer - FastAPI Backend v3
 ===================================
-New in v2:
-  POST /analyze-document  — Vision reads warrants, tickets, IDs
-  POST /generate-report   — post-encounter legal PDF report
+New in v3:
+  WS  /ws/session         — ADK-powered live coaching (replaces hand-rolled WS)
+  ADK Agent               — legal_coach agent with search_laws tool
+  ChromaDB                — semantic law retrieval (laws_db.py)
 
-Uses Google Gemini via Vertex AI (google-genai SDK)
+Uses Google Gemini via Vertex AI + Google ADK for live audio streaming.
 
 Run locally:
     uvicorn main:app --reload --port 8000
@@ -13,16 +14,19 @@ Deploy:
     gcloud builds submit --config ../cloudbuild.yaml .
 """
 
-import os, json, base64, io, asyncio, logging
+import os, json, base64, io, asyncio, logging, uuid, warnings
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Optional
 
-import chromadb
-from chromadb import EmbeddingFunction, Documents
-
 from google import genai
 from google.genai import types
+
+# ADK
+from google.adk.agents.live_request_queue import LiveRequestQueue
+from google.adk.agents.run_config import RunConfig, StreamingMode
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,6 +34,16 @@ from fastapi.responses import Response, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+# Shared law DB (ChromaDB + keyword fallback)
+from laws_db import build_vector_store, query_laws, get_laws, get_client
+
+# ADK agent
+from legal_coach.agent import root_agent
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.getLogger("google_adk").setLevel(logging.WARNING)
+logging.getLogger("websockets").setLevel(logging.WARNING)
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 log = logging.getLogger("lawaier")
 
 from reportlab.lib.pagesizes import letter
@@ -44,12 +58,17 @@ from reportlab.lib.enums import TA_RIGHT
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Build the ChromaDB vector store at startup so the first request is fast."""
+    """Pre-build ChromaDB at startup so first request is fast."""
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, _build_vector_store)
+    await loop.run_in_executor(None, build_vector_store)
     yield
 
-app = FastAPI(title="LawAIer API", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="LawAIer API", version="3.0.0", lifespan=lifespan)
+
+# ── ADK session management ─────────────────────────────────────────────────
+APP_NAME      = "lawaier"
+session_svc   = InMemorySessionService()
+runner        = Runner(app_name=APP_NAME, agent=root_agent, session_service=session_svc)
 _CORS_ORIGINS = ["http://localhost:3000", "http://localhost:5173"]
 _frontend_url = os.environ.get("FRONTEND_URL", "")
 if _frontend_url:
@@ -65,30 +84,6 @@ app.add_middleware(
 
 # ── CONFIG ────────────────────────────────────────────────────────────────
 GEMINI_MODEL = "gemini-2.0-flash"
-
-PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
-LOCATION   = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
-
-# Vertex AI client — lazy-initialized so ADC credentials are resolved at call time
-_genai_client: genai.Client | None = None
-
-def get_client() -> genai.Client:
-    global _genai_client
-    if _genai_client is None:
-        project = os.environ.get("GOOGLE_CLOUD_PROJECT", PROJECT_ID)
-        location = os.environ.get("GOOGLE_CLOUD_LOCATION", LOCATION)
-        _genai_client = genai.Client(vertexai=True, project=project, location=location)
-    return _genai_client
-
-# ── Laws DB (loaded once) ─────────────────────────────────────────────────
-_laws_cache: list[dict] = []
-
-def get_laws() -> list[dict]:
-    global _laws_cache
-    if not _laws_cache:
-        with open("laws_data.json") as f:
-            _laws_cache = json.load(f)
-    return _laws_cache
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────
@@ -135,92 +130,6 @@ class TranscribeAnalyzeRequest(BaseModel):
     user_lang:    str = "en"   # BCP-47 lang code prefix e.g. "hi", "es"
 
 
-# ── Vector DB (ChromaDB + Vertex AI text-embedding-004) ───────────────────
-
-class _VertexEmbedFn(EmbeddingFunction):
-    """Synchronous embedding function that calls Vertex AI text-embedding-004."""
-    def __call__(self, input: Documents):   # type: ignore[override]
-        resp = get_client().models.embed_content(
-            model="text-embedding-004",
-            contents=list(input),
-        )
-        return [e.values for e in resp.embeddings]
-
-_chroma_collection = None
-
-def _build_vector_store():
-    """Build (or return cached) in-memory ChromaDB collection from laws_data.json."""
-    global _chroma_collection
-    if _chroma_collection is not None:
-        return _chroma_collection
-
-    laws = get_laws()
-    client = chromadb.Client()          # in-memory, no disk required
-    col = client.get_or_create_collection(
-        name="lawaier_laws",
-        embedding_function=_VertexEmbedFn(),
-        metadata={"hnsw:space": "cosine"},
-    )
-
-    # Embed document text = title + content for richer semantic signal
-    col.add(
-        ids=[l["id"] for l in laws],
-        documents=[f"{l['title']}. {l['content']}" for l in laws],
-        metadatas=[{
-            "state":               l["state"],
-            "situation":           l["situation"],
-            "urgency":             l["urgency"],
-            "title":               l["title"],
-            "law_reference":       l["law_reference"],
-            "actionable_response": l["actionable_response"],
-            "keywords":            ",".join(l.get("keywords", [])),
-        } for l in laws],
-    )
-
-    _chroma_collection = col
-    log.info("ChromaDB vector store built — %d law chunks indexed.", len(laws))
-    return col
-
-
-def query_laws(query: str, state: str, situation: str, n: int = 5) -> list[dict]:
-    """
-    Semantic search over laws_data.json via ChromaDB + Vertex AI text-embedding-004.
-    Falls back to keyword scoring if the vector store is unavailable.
-    """
-    try:
-        col = _build_vector_store()
-        search_text = query.strip() or f"{situation.replace('_', ' ')} legal rights"
-
-        results = col.query(
-            query_texts=[search_text],
-            n_results=min(n * 3, col.count()),
-            where={"$and": [
-                {"situation": {"$eq": situation}},
-                {"state":     {"$in": [state, "federal"]}},
-            ]},
-        )
-
-        laws_by_id = {l["id"]: l for l in get_laws()}
-        return [laws_by_id[lid] for lid in results["ids"][0] if lid in laws_by_id][:n]
-
-    except Exception as exc:
-        log.warning("Vector search failed (%s) — falling back to keyword search.", exc)
-        return _query_laws_keyword(query, state, situation, n)
-
-
-def _query_laws_keyword(query: str, state: str, situation: str, n: int = 5) -> list[dict]:
-    """Keyword fallback: TF-style scoring over laws_data.json."""
-    laws = get_laws()
-    q = query.lower()
-    scored = []
-    for law in laws:
-        if law["situation"] != situation: continue
-        if law["state"] not in (state, "federal"): continue
-        score = sum(2 for kw in law.get("keywords", []) if kw.lower() in q)
-        score += 1 if law["state"] == state else 0
-        scored.append({**law, "relevance_score": round(score / 10, 2)})
-    scored.sort(key=lambda x: x["relevance_score"], reverse=True)
-    return scored[:n]
 
 def build_system_prompt(laws, situation, state, description, user_lang: str = "en"):
     law_block = "\n\n".join([
@@ -409,112 +318,136 @@ def health():
     return {"status": "ok", "version": "2.0.0"}
 
 
-# ── WebSocket session endpoint ────────────────────────────────────────────────
-async def _do_transcribe_analyze(audio_base64: str, media_type: str, ctx: dict) -> dict:
-    """Core transcription + analysis logic shared by HTTP and WebSocket endpoints."""
-    laws = query_laws("", ctx["state"], ctx["situation"], n=5)
-    law_block = "\n\n".join([
-        f"[LAW {i+1}] {l['title']}\nRef: {l['law_reference']}\n"
-        f"Urgency: {l['urgency'].upper()}\nAdvise: {l['actionable_response']}"
-        for i, l in enumerate(laws)
-    ])
-
-    multilingual = ctx["user_lang"] and ctx["user_lang"] != "en"
-    lang_note = ""
-    if multilingual:
-        lang_note = f"""
-MULTILINGUAL: The detained person speaks {ctx['user_lang']}.
-- Officer speaks ENGLISH → set speaker="officer". Also put the officer's words translated to {ctx['user_lang']} in "translated_for_user".
-- Detained person speaks {ctx['user_lang']} → set speaker="you". Put their words translated to English in "english_text".
-"""
-
-    system = f"""You are a real-time AI legal rights coach monitoring a live {ctx['situation'].replace('_',' ')} encounter in {ctx['state']}.
-
-Listen to the audio chunk carefully.
-{lang_note}
-LAWS TO REFERENCE:
-{law_block}
-
-Rules:
-- "officer" = commanding, authoritative, requests for ID/documents, stating charges, asking to step out
-- "you" = detained person responding, asking about rights, quieter/more hesitant
-- If the audio is silent, unclear, or background noise only → return transcribed="" and speaker=""
-- Coaching suggestion must be actionable, max 1 sentence
-
-Output ONLY valid JSON, no markdown:
-{{"transcribed":"what was said verbatim","speaker":"officer|you|","english_text":"","translated_for_user":"","urgency":"red|yellow|green","suggestion":"","law":""}}"""
-
-    msgs = [{"role": "user", "content": "Transcribe and analyze this audio."}]
-    raw = await call_ai(system, msgs, max_tokens=400,
-                        image_base64=audio_base64, media_type=media_type)
-    return _parse_json(raw, {
-        "transcribed": "", "speaker": "", "english_text": "",
-        "translated_for_user": "", "urgency": "green", "suggestion": "", "law": "",
-    })
-
-
+# ── ADK WebSocket session ─────────────────────────────────────────────────
 @app.websocket("/ws/session")
 async def ws_session(websocket: WebSocket):
     """
-    Persistent WebSocket for real-time audio analysis.
-    Eliminates per-chunk HTTP overhead and chunking issues during translation.
+    ADK-powered live coaching session over WebSocket.
 
-    Message protocol (client → server):
-      { "type": "init", "situation": "...", "state": "...", "description": "...", "user_lang": "en" }
-      { "type": "audio", "data": "<base64>", "media_type": "audio/webm" }
-      { "type": "translate", "text": "...", "target_lang": "Spanish" }
+    Protocol (client → server):
+      1. { "type":"init", "situation":"...", "state":"...", "description":"...", "user_lang":"en" }
+      2. { "type":"audio", "data":"<pcm16 base64 at 16 kHz>" }  — repeated
 
-    Message protocol (server → client):
-      { "type": "ready" }
-      { "type": "analysis", "transcribed": "...", "speaker": "...", ... }
-      { "type": "translation", "translated": "..." }
-      { "type": "error", "message": "..." }
+    Protocol (server → client):
+      { "type":"ready" }
+      { "type":"analysis", "transcribed":"...", "speaker":"...",
+        "english_text":"...", "translated_for_user":"...",
+        "urgency":"red|yellow|green", "suggestion":"...", "law":"..." }
+      { "type":"error", "message":"..." }
     """
     await websocket.accept()
 
-    # Session context — populated by "init" message
-    ctx = {"situation": "", "state": "", "description": "", "user_lang": "en"}
+    # ── Phase 1: receive init ────────────────────────────────────────────
+    try:
+        raw_init = await websocket.receive_text()
+        init = json.loads(raw_init)
+    except Exception:
+        await websocket.send_text(json.dumps({"type": "error", "message": "First message must be JSON init"}))
+        return
+
+    if init.get("type") != "init":
+        await websocket.send_text(json.dumps({"type": "error", "message": "Expected type:init"}))
+        return
+
+    situation  = init.get("situation", "")
+    state_code = init.get("state", "Federal")
+    user_lang  = init.get("user_lang", "en")
+    user_id    = init.get("user_id", "anonymous")
+    session_id = str(uuid.uuid4())
+
+    # ── Phase 2: create ADK session with context as state ───────────────
+    await session_svc.create_session(
+        app_name=APP_NAME,
+        user_id=user_id,
+        session_id=session_id,
+        state={"situation": situation, "state_code": state_code, "user_lang": user_lang},
+    )
+
+    live_request_queue = LiveRequestQueue()
+
+    # Prime the agent with the session context as the first turn
+    live_request_queue.send_content(
+        types.Content(parts=[types.Part(text=json.dumps({
+            "situation": situation,
+            "state_code": state_code,
+            "user_lang": user_lang,
+        }))])
+    )
+
+    # TEXT modality — agent returns structured JSON, not audio
+    run_config = RunConfig(
+        streaming_mode=StreamingMode.BIDI,
+        response_modalities=["TEXT"],
+        session_resumption=types.SessionResumptionConfig(),
+    )
+
+    await websocket.send_text(json.dumps({"type": "ready"}))
+    log.info("ADK session started: %s/%s  situation=%s state=%s lang=%s",
+             user_id, session_id, situation, state_code, user_lang)
+
+    text_buffer = ""
+
+    # ── Phase 3: bidirectional streaming ────────────────────────────────
+    async def upstream():
+        """Forward PCM16 audio from browser to the ADK LiveRequestQueue."""
+        try:
+            while True:
+                msg = await websocket.receive()
+                if "bytes" in msg:
+                    # Raw binary PCM16 frame
+                    blob = types.Blob(mime_type="audio/pcm;rate=16000", data=msg["bytes"])
+                    live_request_queue.send_realtime(blob)
+                elif "text" in msg:
+                    data = json.loads(msg["text"])
+                    if data.get("type") == "audio":
+                        pcm = base64.b64decode(data.get("data", ""))
+                        blob = types.Blob(mime_type="audio/pcm;rate=16000", data=pcm)
+                        live_request_queue.send_realtime(blob)
+        except (WebSocketDisconnect, Exception):
+            pass
+
+    async def downstream():
+        """Receive ADK events, parse JSON responses, forward to browser."""
+        nonlocal text_buffer
+        try:
+            async for event in runner.run_live(
+                user_id=user_id,
+                session_id=session_id,
+                live_request_queue=live_request_queue,
+                run_config=run_config,
+            ):
+                event_dict = json.loads(event.model_dump_json(exclude_none=True, by_alias=True))
+                sc = event_dict.get("serverContent", {})
+
+                # Accumulate text chunks from model turn
+                for part in sc.get("modelTurn", {}).get("parts", []):
+                    if "text" in part:
+                        text_buffer += part["text"]
+
+                # On turn complete — parse and forward the coaching JSON
+                if sc.get("turnComplete") and text_buffer.strip():
+                    raw = text_buffer.strip()
+                    text_buffer = ""
+                    result = _parse_json(raw, {})
+                    # Only forward if it looks like a coaching response
+                    if "transcribed" in result:
+                        await websocket.send_text(json.dumps({"type": "analysis", **result}))
+        except (WebSocketDisconnect, Exception) as e:
+            log.debug("Downstream ended: %s", e)
 
     try:
-        while True:
-            text = await websocket.receive_text()
-            msg = json.loads(text)
-            msg_type = msg.get("type")
-
-            if msg_type == "init":
-                ctx = {
-                    "situation":   msg.get("situation", ""),
-                    "state":       msg.get("state", ""),
-                    "description": msg.get("description", ""),
-                    "user_lang":   msg.get("user_lang", "en"),
-                }
-                await websocket.send_text(json.dumps({"type": "ready"}))
-
-            elif msg_type == "audio":
-                result = await _do_transcribe_analyze(
-                    audio_base64=msg.get("data", ""),
-                    media_type=msg.get("media_type", "audio/webm"),
-                    ctx=ctx,
-                )
-                await websocket.send_text(json.dumps({"type": "analysis", **result}))
-
-            elif msg_type == "translate":
-                system = (
-                    f"You are a precise, literal translator. "
-                    f"Translate the following text to {msg.get('target_lang', 'English')}. "
-                    f"Output ONLY the translated text — no explanations, no quotes."
-                )
-                msgs = [{"role": "user", "content": msg.get("text", "")}]
-                result = await call_ai(system, msgs, max_tokens=400)
-                await websocket.send_text(json.dumps({"type": "translation", "translated": result.strip()}))
-
+        await asyncio.gather(upstream(), downstream())
     except WebSocketDisconnect:
-        pass
+        log.info("Client disconnected: %s/%s", user_id, session_id)
     except Exception as e:
+        log.error("Session error: %s", e)
         try:
             await websocket.send_text(json.dumps({"type": "error", "message": str(e)}))
         except Exception:
             pass
+    finally:
+        live_request_queue.close()
+        log.info("ADK session closed: %s/%s", user_id, session_id)
 
 
 @app.post("/prepare")
