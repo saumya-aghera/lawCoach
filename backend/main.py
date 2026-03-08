@@ -662,6 +662,104 @@ def _build_pdf(req: ReportRequest, assessment: dict) -> bytes:
     return buf.getvalue()
 
 
+
+# ── NEW: Video Analysis ────────────────────────────────────────────────────
+class VideoAnalysisRequest(BaseModel):
+    video_base64: str
+    media_type:   str        # "video/mp4", "video/quicktime", etc.
+    state:        str
+    situation:    str
+    description:  str
+
+@app.post("/analyze-video")
+async def analyze_video(req: VideoAnalysisRequest):
+    """
+    User uploads dashcam or CCTV footage.
+    AI watches the full video and returns:
+      - Timeline of events with timestamps
+      - Rights violations detected
+      - Officer conduct assessment
+      - Evidence strength rating
+      - Key observations
+      - Recommended actions
+
+    PRE-HACKATHON: Claude vision (supports video via base64)
+    HACKATHON_DAY: Gemini Flash — native video understanding, better timestamps
+    """
+    laws    = query_laws(req.description, req.state, req.situation)
+    law_ctx = "\n".join([f"- {l['title']}: {l['actionable_response']}" for l in laws])
+
+    footage_hints = {
+        "traffic_stop":  "dashcam footage of a traffic stop",
+        "arrest":        "video footage of an arrest",
+        "search":        "video footage of a search of property or person",
+        "immigration":   "video footage of an immigration enforcement encounter",
+        "interrogation": "video footage of a police interrogation or questioning",
+    }
+    footage_type = footage_hints.get(req.situation, "footage of a law enforcement encounter")
+
+    system = f"""You are an expert legal video analyst reviewing {footage_type}.
+User situation: {req.situation.replace('_', ' ')} in {req.state}.
+Context: {req.description}
+
+Relevant laws:
+{law_ctx}
+
+Watch the entire video carefully. Analyze for:
+1. Sequence of events with approximate timestamps
+2. Any potential rights violations
+3. Officer conduct and procedure compliance
+4. Evidence value for legal proceedings
+5. Key visual details (badge numbers, witness presence, use of force)
+
+Respond ONLY with this JSON (no markdown):
+{{
+  "footage_type": "Dashcam Footage|CCTV Footage|Phone Recording|Other",
+  "summary": "2-3 sentence overview of what the video shows",
+  "duration": "approximate duration if determinable",
+  "urgency": "red|yellow|green",
+  "timeline": [
+    {{"timestamp": "0:00", "event": "description of what happens", "significant": true}},
+    {{"timestamp": "0:15", "event": "description", "significant": false}}
+  ],
+  "violations_detected": [
+    "Specific potential rights violation observed"
+  ],
+  "officer_conduct": "Assessment of whether officer followed proper procedure",
+  "evidence_strength": "Strong|Moderate|Weak — brief reason",
+  "key_observations": [
+    "Badge number visible: XXX",
+    "Two officers present",
+    "Subject was compliant throughout"
+  ],
+  "recommended_actions": [
+    "Preserve this footage — do not delete",
+    "Specific legal action to take"
+  ],
+  "recommended_next_step": "Single most important action to take with this footage"
+}}"""
+
+    msgs = [{"role":"user","content":"Please analyze this video footage of the encounter."}]
+
+    # For video, we send as image type since Claude handles video frames
+    # HACKATHON_DAY: Gemini natively handles video — just pass video/mp4 directly
+    raw = await call_ai(system, msgs, max_tokens=1500,
+                        image_base64=req.video_base64, media_type=req.media_type)
+
+    return _parse_json(raw, {
+        "footage_type": "Video Footage",
+        "summary": "Video could not be fully analyzed. Ensure the file is a clear, supported format (MP4, MOV).",
+        "duration": "Unknown",
+        "urgency": "yellow",
+        "timeline": [],
+        "violations_detected": [],
+        "officer_conduct": "Could not assess — try a clearer or shorter video clip.",
+        "evidence_strength": "Unknown",
+        "key_observations": ["Video analysis incomplete — try again with a shorter clip"],
+        "recommended_actions": ["Preserve the original footage", "Consult an attorney"],
+        "recommended_next_step": "Consult a licensed attorney and provide them the original footage"
+    })
+
 @app.get("/laws")
 def list_laws(state: Optional[str] = None, situation: Optional[str] = None):
     with open("laws_data.json") as f: laws = json.load(f)

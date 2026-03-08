@@ -2,27 +2,53 @@ import { useState, useEffect, useRef, useCallback } from "react";
 
 const API_BASE = "http://localhost:8000";
 
-// ── Constants ─────────────────────────────────────────────────────────────
-const SITUATIONS = [
-  { id:"traffic_stop",  icon:"🚗", label:"Traffic Stop",   desc:"Pulled over by police" },
-  { id:"arrest",        icon:"🚨", label:"Arrest",         desc:"Being placed under arrest" },
-  { id:"search",        icon:"🔍", label:"Search",         desc:"Officer wants to search" },
-  { id:"immigration",   icon:"🛂", label:"Immigration",    desc:"Immigration encounter" },
-  { id:"interrogation", icon:"💬", label:"Interrogation",  desc:"Police questioning" },
-];
-const STATES = ["NY","CA","TX","FL","federal"];
-const UX = {
-  red:    { bg:"rgba(255,45,45,0.09)",  border:"#ff2d2d", badge:"#ff2d2d", label:"ACT NOW",   dot:"🔴", glow:"0 0 18px rgba(255,45,45,0.35)"  },
-  yellow: { bg:"rgba(255,179,0,0.09)",  border:"#ffb300", badge:"#ffb300", label:"CAUTION",   dot:"🟡", glow:"0 0 18px rgba(255,179,0,0.3)"   },
-  green:  { bg:"rgba(0,229,118,0.09)",  border:"#00e576", badge:"#00e576", label:"YOU'RE OK", dot:"🟢", glow:"0 0 18px rgba(0,229,118,0.2)"   },
-};
-const DOC_LABELS = {
-  judicial_warrant:"Judicial Warrant", administrative_warrant:"Admin Warrant",
-  summons:"Summons", traffic_ticket:"Traffic Ticket", notice:"Notice",
-  id_document:"ID Document", other:"Document",
+// ─── Palette ───────────────────────────────────────────────────────────────
+// Single blue palette: navy text, slate grays, white backgrounds, blue accents
+const P = {
+  navy:     "#0f2040",
+  blue:     "#1d4ed8",
+  blueL:    "#3b6ef8",
+  blueBg:   "#eff4ff",
+  blueBd:   "#c7d7fd",
+  slate:    "#475569",
+  slateL:   "#94a3b8",
+  slateXL:  "#cbd5e1",
+  bg:       "#f8fafc",
+  white:    "#ffffff",
+  border:   "#e2e8f0",
+  red:      "#dc2626",
+  redBg:    "#fef2f2",
+  redBd:    "#fecaca",
+  amber:    "#d97706",
+  amberBg:  "#fffbeb",
+  amberBd:  "#fde68a",
+  green:    "#16a34a",
+  greenBg:  "#f0fdf4",
+  greenBd:  "#bbf7d0",
 };
 
-// ── Lawyer database by situation + state ──────────────────────────────────
+// ─── Data ──────────────────────────────────────────────────────────────────
+const SITUATIONS = [
+  { id:"traffic_stop",  icon:"🚗", label:"Traffic Stop",    desc:"Pulled over by police" },
+  { id:"arrest",        icon:"🚨", label:"Arrest",          desc:"Being placed under arrest" },
+  { id:"search",        icon:"🔍", label:"Search",          desc:"Officer wants to search property" },
+  { id:"immigration",   icon:"🛂", label:"Immigration",     desc:"Immigration enforcement encounter" },
+  { id:"interrogation", icon:"💬", label:"Interrogation",   desc:"Police questioning or interview" },
+];
+const STATES = ["NY","CA","TX","FL","Federal"];
+
+const URGENCY = {
+  red:    { bg:P.redBg,   border:P.redBd,   text:P.red,   label:"Act Now",   icon:"🔴" },
+  yellow: { bg:P.amberBg, border:P.amberBd, text:P.amber, label:"Caution",   icon:"🟡" },
+  green:  { bg:P.greenBg, border:P.greenBd, text:P.green, label:"You're OK", icon:"🟢" },
+};
+
+const DOC_LABELS = {
+  judicial_warrant:"Judicial Warrant", administrative_warrant:"Admin Warrant",
+  summons:"Summons", traffic_ticket:"Traffic Ticket",
+  notice:"Notice", id_document:"ID / License", other:"Document",
+};
+
 const LAWYERS_DB = {
   traffic_stop: {
     NY: [
@@ -141,58 +167,49 @@ function getLawyers(situation, state) {
   return byState[state] || byState["NY"] || [];
 }
 
-// ── API helpers ───────────────────────────────────────────────────────────
+// ─── API ───────────────────────────────────────────────────────────────────
 const post = (url, body) =>
   fetch(`${API_BASE}${url}`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) })
-    .then(r => { if(!r.ok) throw new Error(`${url} → ${r.status}`); return r.json(); });
+    .then(r => { if(!r.ok) throw new Error(`${r.status}`); return r.json(); });
 
-async function apiPrepare(situation, state, description) {
-  return post("/prepare", { situation, state, description });
-}
-async function apiAnalyze(spoken_text, situation, state, description, conversation_history) {
-  return post("/analyze", { spoken_text, situation, state, description, conversation_history });
-}
-async function apiAnalyzeDocument(image_base64, media_type, state, situation, description) {
-  return post("/analyze-document", { image_base64, media_type, state, situation, description });
-}
-async function apiGenerateReport(body) {
-  const res = await fetch(`${API_BASE}/generate-report`, {
-    method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)
-  });
-  if (!res.ok) throw new Error(`report → ${res.status}`);
-  return res.blob();
-}
+const apiPrepare         = (situation, state, description) => post("/prepare", { situation, state, description });
+const apiAnalyze         = (spoken_text, situation, state, description, conversation_history) =>
+  post("/analyze", { spoken_text, situation, state, description, conversation_history });
+const apiAnalyzeDocument = (image_base64, media_type, state, situation, description) =>
+  post("/analyze-document", { image_base64, media_type, state, situation, description });
+const apiAnalyzeVideo    = (video_base64, media_type, state, situation, description) =>
+  post("/analyze-video", { video_base64, media_type, state, situation, description });
+const apiGenerateReport  = (body) =>
+  fetch(`${API_BASE}/generate-report`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) })
+    .then(r => { if(!r.ok) throw new Error(`${r.status}`); return r.blob(); });
 
-// ── Speech hook ───────────────────────────────────────────────────────────
+// ─── Speech hook ───────────────────────────────────────────────────────────
 function useSpeech(onResult) {
   const ref = useRef(null);
   const [listening, setListening] = useState(false);
   const [supported, setSupported] = useState(true);
-
   useEffect(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) { setSupported(false); return; }
     const r = new SR();
     r.continuous = true; r.interimResults = false; r.lang = "en-US";
     r.onresult = e => { const t = e.results[e.results.length-1][0].transcript.trim(); if(t) onResult(t); };
-    r.onerror  = e => console.error("[Speech]", e.error);
+    r.onerror  = () => {};
     r.onend    = () => setListening(false);
     ref.current = r;
   }, [onResult]);
-
   const start = useCallback(() => { ref.current?.start(); setListening(true); }, []);
   const stop  = useCallback(() => { ref.current?.stop();  setListening(false); }, []);
   return { listening, supported, start, stop };
 }
 
-// ── Main App ──────────────────────────────────────────────────────────────
+// ─── Main App ──────────────────────────────────────────────────────────────
+// Screens: s1_situation → s2_state → s3_listening → s4_results
 export default function App() {
-  // screen: intake | ready | listening | done
-  const [screen,      setScreen]      = useState("intake");
+  const [screen,      setScreen]      = useState("s1_situation");
   const [situation,   setSituation]   = useState(null);
   const [stateCode,   setStateCode]   = useState(null);
   const [description, setDescription] = useState("");
-  const [loadedLaws,  setLoadedLaws]  = useState([]);
   const [suggestions, setSuggestions] = useState([]);
   const [transcript,  setTranscript]  = useState([]);
   const [history,     setHistory]     = useState([]);
@@ -202,34 +219,35 @@ export default function App() {
   const [backendOk,   setBackendOk]   = useState(null);
   const [startTime,   setStartTime]   = useState(null);
 
-  // Vision state
-  const [showCamera,     setShowCamera]     = useState(false);
-  const [scanResult,     setScanResult]     = useState(null);
-  const [scanning,       setScanning]       = useState(false);
-  const [docFindings,    setDocFindings]    = useState([]);
-  const videoRef  = useRef(null);
-  const streamRef = useRef(null);
-  const canvasRef = useRef(null);
+  // Image scan
+  const [scanResult,  setScanResult]  = useState(null);
+  const [scanning,    setScanning]    = useState(false);
+  const [docFindings, setDocFindings] = useState([]);
 
-  // Report state
+  // Video analysis
+  const [videoResult,   setVideoResult]   = useState(null);
+  const [videoAnalyzing,setVideoAnalyzing]= useState(false);
+  const [videoName,     setVideoName]     = useState("");
+
+  // Report
   const [reportLoading, setReportLoading] = useState(false);
   const [reportReady,   setReportReady]   = useState(false);
-  const [showLawyers,   setShowLawyers]   = useState(false);
-  const pdfBlobRef = useRef(null);
+
+  // Lawyers
+  const [showLawyers, setShowLawyers] = useState(false);
+
+  // Results tab: "suggestions" | "document" | "video" | "lawyers"
+  const [activeTab, setActiveTab] = useState("suggestions");
 
   const feedEndRef = useRef(null);
-
   useEffect(() => { feedEndRef.current?.scrollIntoView({ behavior:"smooth" }); }, [suggestions]);
-
   useEffect(() => {
-    fetch(`${API_BASE}/health`)
-      .then(r => setBackendOk(r.ok))
-      .catch(() => setBackendOk(false));
+    fetch(`${API_BASE}/health`).then(r => setBackendOk(r.ok)).catch(() => setBackendOk(false));
   }, []);
 
-  // ── Speech handler ────────────────────────────────────────────────────
+  // ── Speech ──────────────────────────────────────────────────────────────
   const handleSpeech = useCallback(async (text) => {
-    const ts = new Date().toLocaleTimeString();
+    const ts = new Date().toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
     setTranscript(p => [...p, { text, ts }]);
     const msg = { role:"user", content:`Other party said: "${text}"` };
     const h2  = [...history, msg];
@@ -243,419 +261,448 @@ export default function App() {
         setHistory(p => [...p, { role:"assistant", content:JSON.stringify(res) }]);
         setSuggestions(p => [...p, { ...res, id:Date.now(), time:ts, trigger:text }]);
       }
-    } catch(e) { setError("Analysis failed — is backend running?"); }
+    } catch { setError("Analysis failed — check backend is running."); }
     setIsThinking(false);
   }, [situation, stateCode, description, history, isThinking]);
 
-  const { listening, supported, start:startSpeech, stop:stopSpeech } = useSpeech(handleSpeech);
+  const { listening, supported, start: startSpeech, stop: stopSpeech } = useSpeech(handleSpeech);
 
-  // ── Prepare ───────────────────────────────────────────────────────────
-  async function handlePrepare() {
+  // ── Nav ─────────────────────────────────────────────────────────────────
+  async function goToState() {
+    if (!situation) return;
+    setScreen("s2_state");
+  }
+
+  async function startSession() {
+    if (!stateCode) return;
     setPreparing(true); setError(null);
-    try {
-      const data = await apiPrepare(situation, stateCode, description);
-      setLoadedLaws(data.laws);
-      setScreen("ready");
-    } catch {
-      setLoadedLaws(fallbackLaws(situation, stateCode));
-      setScreen("ready");
-      setError("Backend offline — using local law cache.");
-    } finally { setPreparing(false); }
-  }
-
-  // ── Camera ────────────────────────────────────────────────────────────
-  async function openCamera() {
-    setShowCamera(true); setScanResult(null);
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode:"environment" } });
-      streamRef.current = stream;
-      if (videoRef.current) videoRef.current.srcObject = stream;
-    } catch { setError("Camera access denied."); setShowCamera(false); }
-  }
-
-  function closeCamera() {
-    streamRef.current?.getTracks().forEach(t => t.stop());
-    setShowCamera(false);
-  }
-
-  async function captureAndScan() {
-    if (!videoRef.current || !canvasRef.current) return;
-    const video  = videoRef.current;
-    const canvas = canvasRef.current;
-    canvas.width  = video.videoWidth;
-    canvas.height = video.videoHeight;
-    canvas.getContext("2d").drawImage(video, 0, 0);
-    const dataUrl    = canvas.toDataURL("image/jpeg", 0.85);
-    const base64     = dataUrl.split(",")[1];
-    const media_type = "image/jpeg";
-
-    setScanning(true);
-    try {
-      const result = await apiAnalyzeDocument(base64, media_type, stateCode, situation, description);
-      setScanResult(result);
-      setDocFindings(p => [...p, result]);
-      closeCamera();
-    } catch { setError("Document scan failed."); }
-    setScanning(false);
-  }
-
-  // Also allow file upload as fallback
-  async function handleFileUpload(e) {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = async (ev) => {
-      const dataUrl    = ev.target.result;
-      const base64     = dataUrl.split(",")[1];
-      const media_type = file.type || "image/jpeg";
-      setScanning(true);
-      try {
-        const result = await apiAnalyzeDocument(base64, media_type, stateCode, situation, description);
-        setScanResult(result);
-        setDocFindings(p => [...p, result]);
-      } catch { setError("Document scan failed."); }
-      setScanning(false);
-    };
-    reader.readAsDataURL(file);
-  }
-
-  // ── Listen controls ───────────────────────────────────────────────────
-  function startListening() {
-    if (!supported) { setError("Speech recognition requires Chrome."); return; }
+    try { await apiPrepare(situation, stateCode, description); } catch { /* fallback ok */ }
+    setPreparing(false);
     setSuggestions([]); setTranscript([]); setHistory([]);
-    setDocFindings([]); setScanResult(null);
+    setDocFindings([]); setScanResult(null); setVideoResult(null);
     setStartTime(Date.now());
     startSpeech();
-    setScreen("listening");
+    setScreen("s3_listening");
   }
 
   function stopListening() {
     stopSpeech();
-    setScreen("done");
-  }
-
-  // ── Report ────────────────────────────────────────────────────────────
-  async function downloadReport() {
-    setReportLoading(true); setError(null);
-    try {
-      const blob = await apiGenerateReport({
-        situation, state: stateCode, description,
-        transcript, suggestions, doc_findings: docFindings,
-        duration_seconds: startTime ? Math.floor((Date.now() - startTime) / 1000) : 0,
-      });
-      pdfBlobRef.current = blob;
-      const url  = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href     = url;
-      link.download = `law-coach-report-${Date.now()}.pdf`;
-      link.click();
-      URL.revokeObjectURL(url);
-      setReportReady(true);
-      setShowLawyers(true);
-    } catch { setError("Report generation failed — is backend running?"); }
-    setReportLoading(false);
-  }
-
-  function contactLawyer(lawyer) {
-    const sitLabel = situation?.replace(/_/g," ") || "legal";
-    const subject  = encodeURIComponent(`Legal Assistance Needed — ${sitLabel} in ${stateCode}`);
-    const body     = encodeURIComponent(
-`Dear ${lawyer.name},
-
-I am reaching out regarding a recent ${sitLabel} encounter in ${stateCode} and am seeking legal representation.
-
-Situation summary: ${description}
-
-I have attached a detailed incident report generated by AI Law Coach which includes:
-- Full encounter timeline
-- Rights invoked during the encounter
-- AI coaching suggestions provided
-- Any documents scanned during the encounter
-- Recommended next steps
-
-Please find the report attached. I would appreciate the opportunity to discuss my case with you.
-
-Thank you for your time.
-
-[Your Name]
-[Your Phone Number]`
-    );
-    // Opens default mail client with pre-filled draft
-    // User attaches the PDF manually (browsers can't auto-attach files to mailto)
-    window.location.href = `mailto:${lawyer.email}?subject=${subject}&body=${body}`;
+    setScreen("s4_results");
+    setActiveTab("suggestions");
   }
 
   function reset() {
     setSituation(null); setStateCode(null); setDescription("");
     setSuggestions([]); setTranscript([]); setHistory([]);
-    setLoadedLaws([]); setDocFindings([]); setScanResult(null);
-    setError(null); setReportReady(false); setScreen("intake");
+    setDocFindings([]); setScanResult(null);
+    setVideoResult(null); setVideoName("");
+    setError(null); setReportReady(false); setShowLawyers(false);
+    setScreen("s1_situation");
   }
 
-  // ── RENDER ────────────────────────────────────────────────────────────
-  return (
-    <div style={C.app}>
-      <style>{GCSS}</style>
+  // ── Image upload ─────────────────────────────────────────────────────────
+  async function handleImageUpload(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setScanning(true); setError(null);
+    const reader = new FileReader();
+    reader.onload = async (ev) => {
+      const dataUrl    = ev.target.result;
+      const base64     = dataUrl.split(",")[1];
+      const media_type = file.type || "image/jpeg";
+      try {
+        const result = await apiAnalyzeDocument(base64, media_type, stateCode, situation, description);
+        setScanResult(result);
+        setDocFindings(p => [...p, result]);
+        setActiveTab("document");
+      } catch { setError("Document scan failed — check backend is running."); }
+      setScanning(false);
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  }
 
-      {/* HEADER */}
-      <header style={C.hdr}>
-        <div style={C.hdrL}>
-          <span style={{fontSize:20}}>⚖️</span>
-          <span style={C.logo}>LAW COACH AI</span>
-          <span style={C.beta}>BETA · v2</span>
+  // ── Video upload ─────────────────────────────────────────────────────────
+  async function handleVideoUpload(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setVideoAnalyzing(true); setVideoName(file.name); setError(null);
+    const reader = new FileReader();
+    reader.onload = async (ev) => {
+      const dataUrl    = ev.target.result;
+      const base64     = dataUrl.split(",")[1];
+      const media_type = file.type || "video/mp4";
+      try {
+        const result = await apiAnalyzeVideo(base64, media_type, stateCode, situation, description);
+        setVideoResult(result);
+        setActiveTab("video");
+      } catch { setError("Video analysis failed — check backend is running."); }
+      setVideoAnalyzing(false);
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  }
+
+  // ── Report ───────────────────────────────────────────────────────────────
+  async function downloadReport() {
+    setReportLoading(true); setError(null);
+    try {
+      const blob = await apiGenerateReport({
+        situation, state: stateCode, description,
+        transcript, suggestions,
+        doc_findings: docFindings,
+        video_findings: videoResult ? [videoResult] : [],
+        duration_seconds: startTime ? Math.floor((Date.now()-startTime)/1000) : 0,
+      });
+      const url  = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url; link.download = `law-coach-report-${Date.now()}.pdf`;
+      link.click(); URL.revokeObjectURL(url);
+      setReportReady(true);
+    } catch { setError("Report generation failed — check backend is running."); }
+    setReportLoading(false);
+  }
+
+  // ── Contact lawyer ────────────────────────────────────────────────────────
+  function contactLawyer(lawyer) {
+    const sit     = situation?.replace(/_/g," ") || "legal";
+    const subject = encodeURIComponent(`Legal Assistance — ${sit} in ${stateCode}`);
+    const body    = encodeURIComponent(
+`Dear ${lawyer.name},
+
+I am seeking legal representation regarding a recent ${sit} encounter in ${stateCode}.
+
+Summary: ${description || "Please see attached incident report."}
+
+I have attached a detailed AI Law Coach incident report which includes the full encounter timeline, rights invoked, AI coaching suggestions provided, and any evidence analyzed.
+
+I would greatly appreciate the opportunity to discuss my case.
+
+Thank you,
+[Your Name]
+[Your Phone Number]`);
+    window.location.href = `mailto:${lawyer.email}?subject=${subject}&body=${body}`;
+  }
+
+  const sitInfo = SITUATIONS.find(s => s.id === situation);
+
+  // ─── RENDER ───────────────────────────────────────────────────────────────
+  return (
+    <div style={s.app}>
+      <style>{CSS}</style>
+
+      {/* ── HEADER ── */}
+      <header style={s.header}>
+        <div style={s.headerLeft}>
+          <span style={s.headerLogo}>⚖ Law Coach</span>
+          {situation && stateCode && screen !== "s1_situation" && screen !== "s2_state" && (
+            <span style={s.headerPill}>{sitInfo?.label} · {stateCode}</span>
+          )}
         </div>
-        <div style={C.hdrR}>
-          <span style={{...C.dot, background: backendOk===null?"#4b5563":backendOk?"#00e576":"#ff2d2d"}}/>
-          <span style={C.statusTxt}>{backendOk===null?"checking...":backendOk?"backend online":"backend offline"}</span>
-          <span style={C.notlegal}>NOT LEGAL ADVICE</span>
+        <div style={s.headerRight}>
+          <span style={{...s.statusDot, background: backendOk===null?P.slateXL : backendOk?P.green:P.red}} />
+          <span style={s.statusText}>{backendOk===null?"connecting…":backendOk?"Connected":"Offline"}</span>
         </div>
       </header>
 
-      <main style={C.main}>
+      {/* ── STEP BAR (steps 1-4 only on setup screens) ── */}
+      {(screen==="s1_situation"||screen==="s2_state") && (
+        <div style={s.stepBar}>
+          {["Situation","State","Session","Results"].map((label,i) => {
+            const stepNum = i+1;
+            const curStep = screen==="s1_situation"?1:2;
+            const done    = stepNum < curStep;
+            const active  = stepNum === curStep;
+            return (
+              <div key={label} style={s.stepItem}>
+                <div style={{...s.stepCircle,
+                  background: done?P.blue:active?P.blue:P.white,
+                  border: `2px solid ${done||active?P.blue:P.slateXL}`,
+                  color: done||active?P.white:P.slateL}}>
+                  {done ? "✓" : stepNum}
+                </div>
+                <span style={{...s.stepLabel, color:active?P.navy:done?P.blue:P.slateL}}>{label}</span>
+                {i < 3 && <div style={{...s.stepLine, background:done?P.blue:P.slateXL}} />}
+              </div>
+            );
+          })}
+        </div>
+      )}
 
-        {/* ══ INTAKE ══════════════════════════════════════════════════════ */}
-        {screen==="intake" && (
-          <div className="fi">
-            <div style={{marginBottom:32}}>
-              <div style={C.h1}>Know Your Rights.</div>
-              <div style={C.sub}>Real-time AI coaching during police encounters.<br/>Select your situation to begin.</div>
+      <main style={s.main}>
+
+        {/* ══════════════════════════════════════════════════════════════
+            SCREEN 1 — SELECT SITUATION
+        ══════════════════════════════════════════════════════════════ */}
+        {screen==="s1_situation" && (
+          <div className="fade">
+            <div style={s.pageHeader}>
+              <h1 style={s.h1}>What's happening?</h1>
+              <p style={s.subtext}>Select the situation you're facing. Your coach will load the relevant laws.</p>
             </div>
 
-            <Label n="01" t="What's happening?" />
-            <div style={C.grid2}>
-              {SITUATIONS.map(s => (
-                <button key={s.id} className="cb" style={C.sCard(situation===s.id)} onClick={()=>setSituation(s.id)}>
-                  <span style={{fontSize:22,marginBottom:4}}>{s.icon}</span>
-                  <span style={C.sCardLbl(situation===s.id)}>{s.label}</span>
-                  <span style={C.sCardDsc}>{s.desc}</span>
+            <div style={s.situationGrid}>
+              {SITUATIONS.map(sit => (
+                <button key={sit.id} className="sitCard" onClick={() => { setSituation(sit.id); goToState(); }}
+                  style={{...s.sitCard, ...(situation===sit.id ? s.sitCardActive : {})}}>
+                  <span style={s.sitIcon}>{sit.icon}</span>
+                  <span style={s.sitLabel}>{sit.label}</span>
+                  <span style={s.sitDesc}>{sit.desc}</span>
+                  <span style={{...s.sitArrow, opacity: situation===sit.id?1:0}}>→</span>
                 </button>
               ))}
             </div>
 
-            <Label n="02" t="Which state?" />
-            <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:28}}>
+            <p style={s.legalNote}>⚠ This tool provides general legal information only — not legal advice. Always consult a licensed attorney.</p>
+          </div>
+        )}
+
+        {/* ══════════════════════════════════════════════════════════════
+            SCREEN 2 — SELECT STATE
+        ══════════════════════════════════════════════════════════════ */}
+        {screen==="s2_state" && (
+          <div className="fade">
+            <button style={s.backBtn} onClick={() => setScreen("s1_situation")}>← Back</button>
+
+            <div style={s.pageHeader}>
+              <div style={s.situationBadge}>
+                <span>{sitInfo?.icon}</span>
+                <span>{sitInfo?.label}</span>
+              </div>
+              <h1 style={s.h1}>Which state?</h1>
+              <p style={s.subtext}>State laws vary significantly. We'll load the right statutes for your location.</p>
+            </div>
+
+            <div style={s.stateGrid}>
               {STATES.map(st => (
-                <button key={st} className="sb" style={C.stBtn(stateCode===st)} onClick={()=>setStateCode(st)}>{st}</button>
-              ))}
-            </div>
-
-            <Label n="03" t="Briefly describe what's happening" />
-            <textarea style={C.ta} placeholder="e.g. Officer pulled me over asking to search my car..."
-              value={description} onChange={e=>setDescription(e.target.value)} />
-
-            {error && <ErrBar msg={error} />}
-            <button style={C.primBtn(!situation||!stateCode||preparing)} className="pb"
-              disabled={!situation||!stateCode||preparing} onClick={handlePrepare}>
-              {preparing ? "LOADING LAWS..." : "PREPARE MY COACH →"}
-            </button>
-          </div>
-        )}
-
-        {/* ══ READY ═══════════════════════════════════════════════════════ */}
-        {screen==="ready" && (
-          <div className="fi">
-            <div style={{marginBottom:24}}>
-              <div style={C.tag}>READY</div>
-              <div style={C.h2}>Your coach is prepared.</div>
-              <div style={C.sub2}>{loadedLaws.length} laws loaded · {situation?.replace("_"," ")} · {stateCode}</div>
-            </div>
-            {error && <ErrBar msg={error} />}
-
-            <div style={C.lawBox}>
-              <Label n="" t="Laws loaded for your situation" />
-              {loadedLaws.map((l,i) => (
-                <div key={l.id||i} style={C.lawRow}>
-                  <div style={C.lawTop}>
-                    <span>{UX[l.urgency]?.dot||"⚪"}</span>
-                    <span style={C.lawTitle}>{l.title}</span>
-                    <span style={C.lawSt}>{l.state}</span>
-                  </div>
-                  <div style={C.lawRef}>{l.law_reference}</div>
-                  <div style={C.lawAct}>→ {l.actionable_response}</div>
-                </div>
-              ))}
-            </div>
-
-            <button style={C.listenIdle} className="lbtn" onClick={startListening}>
-              <span style={{fontSize:22}}>🎤</span> START LISTENING
-            </button>
-            <button style={C.backBtn} onClick={()=>setScreen("intake")}>← CHANGE SITUATION</button>
-          </div>
-        )}
-
-        {/* ══ LISTENING ═══════════════════════════════════════════════════ */}
-        {screen==="listening" && (
-          <div className="fi">
-            {/* Top bar */}
-            <div style={C.listenBar}>
-              <div style={{display:"flex",alignItems:"center",gap:10}}>
-                <span className="pdot" />
-                <span style={C.liveLabel}>LISTENING LIVE</span>
-              </div>
-              <div style={{display:"flex",alignItems:"center",gap:12}}>
-                {isThinking && <span style={C.thinking}>analyzing...</span>}
-                {/* SCAN DOCUMENT BUTTON */}
-                <button style={C.scanBtn} onClick={openCamera} title="Scan a document">
-                  📷 SCAN DOC
+                <button key={st} className="stateBtn" onClick={() => setStateCode(st)}
+                  style={{...s.stateBtn, ...(stateCode===st ? s.stateBtnActive : {})}}>
+                  <span style={s.stateName}>{st}</span>
+                  <span style={s.stateLabel}>{st==="Federal"?"Federal Law":`${st} State Law`}</span>
                 </button>
-              </div>
+              ))}
             </div>
 
-            {error && <ErrBar msg={error} />}
+            <div style={s.descSection}>
+              <label style={s.label}>Briefly describe what's happening <span style={{color:P.slateL}}>(optional)</span></label>
+              <textarea style={s.textarea}
+                placeholder="e.g. Officer pulled me over on I-95, asking to search my vehicle..."
+                value={description} onChange={e => setDescription(e.target.value)} />
+            </div>
 
-            {/* Doc scan result inline */}
-            {scanResult && <DocCard result={scanResult} onDismiss={()=>setScanResult(null)} />}
+            {error && <ErrBanner msg={error} />}
 
-            {/* Camera modal */}
-            {showCamera && (
-              <div style={C.cameraModal}>
-                <div style={C.cameraBox}>
-                  <div style={C.camHeader}>
-                    <span style={{fontSize:13,fontWeight:700,letterSpacing:1}}>📷 SCAN DOCUMENT</span>
-                    <button style={C.camClose} onClick={closeCamera}>✕</button>
-                  </div>
-                  <video ref={videoRef} autoPlay playsInline style={C.video} />
-                  <canvas ref={canvasRef} style={{display:"none"}} />
-                  <div style={{display:"flex",gap:10,padding:12}}>
-                    <button style={C.captureBtn} onClick={captureAndScan} disabled={scanning}>
-                      {scanning ? "SCANNING..." : "📸 CAPTURE & ANALYZE"}
-                    </button>
-                    <label style={C.uploadBtn}>
-                      📁 UPLOAD
-                      <input type="file" accept="image/*" style={{display:"none"}} onChange={handleFileUpload} />
-                    </label>
-                  </div>
-                  {scanning && <div style={C.scanningMsg}>🔍 AI reading document...</div>}
+            <button style={{...s.primaryBtn, opacity:!stateCode||preparing?0.5:1}}
+              disabled={!stateCode||preparing} onClick={startSession} className="primaryBtn">
+              {preparing ? "Loading laws…" : "Start Session →"}
+            </button>
+          </div>
+        )}
+
+        {/* ══════════════════════════════════════════════════════════════
+            SCREEN 3 — LISTENING
+        ══════════════════════════════════════════════════════════════ */}
+        {screen==="s3_listening" && (
+          <div className="fade">
+            <div style={s.listenHeader}>
+              <div>
+                <div style={s.listenTitle}>
+                  <span style={s.liveDot} className="pulse" />
+                  <span style={{fontSize:15,fontWeight:600,color:P.navy}}>Listening Live</span>
+                  {isThinking && <span style={s.thinkingBadge}>analyzing…</span>}
                 </div>
+                <div style={s.listenSub}>{sitInfo?.label} · {stateCode}</div>
               </div>
-            )}
+              <button style={s.stopBtn} onClick={stopListening}>Stop Session</button>
+            </div>
 
-            {/* Suggestion feed */}
-            <div style={C.feed}>
-              {suggestions.length===0 ? (
-                <div style={C.empty}>
-                  <div style={{fontSize:40,marginBottom:12}}>👂</div>
-                  <div style={C.emptyTxt}>Listening for legally significant moments...</div>
-                  <div style={C.emptyHint}>Point mic at the conversation · Use 📷 to scan documents</div>
+            {error && <ErrBanner msg={error} />}
+
+            <div style={s.feedArea}>
+              {suggestions.length === 0 ? (
+                <div style={s.emptyFeed}>
+                  <div style={{fontSize:36,marginBottom:10}}>👂</div>
+                  <div style={{fontSize:14,color:P.slate,marginBottom:4}}>Listening for legally significant moments</div>
+                  <div style={{fontSize:12,color:P.slateL}}>Speak clearly near your device's microphone</div>
                 </div>
-              ) : suggestions.map(s => <SugCard key={s.id} s={s} />)}
+              ) : suggestions.map(sug => <SugCard key={sug.id} s={sug} />)}
               <div ref={feedEndRef} />
             </div>
 
-            <button style={C.listenActive} onClick={stopListening}>
-              <span>⏹</span> STOP LISTENING
-            </button>
-
-            {transcript.length>0 && (
-              <div style={C.txBox}>
-                <div style={C.txLabel}>HEARD</div>
-                {transcript.slice(-5).map((t,i)=>(
-                  <div key={i} style={C.txLine}>
-                    <span style={C.txTime}>{t.ts}</span>
-                    <span>"{t.text}"</span>
+            {transcript.length > 0 && (
+              <div style={s.transcriptBox}>
+                <div style={s.transcriptLabel}>Transcript</div>
+                {transcript.slice(-4).map((t,i) => (
+                  <div key={i} style={s.transcriptLine}>
+                    <span style={s.transcriptTime}>{t.ts}</span>
+                    <span style={{color:P.slate}}>"{t.text}"</span>
                   </div>
                 ))}
+              </div>
+            )}
+
+            {!supported && (
+              <div style={{...s.errBanner, marginTop:12}}>
+                Speech recognition requires Chrome or Edge. Use a supported browser for live audio.
               </div>
             )}
           </div>
         )}
 
-        {/* ══ DONE ════════════════════════════════════════════════════════ */}
-        {screen==="done" && (
-          <div className="fi">
-            <div style={{marginBottom:24}}>
-              <div style={C.tag}>SESSION ENDED</div>
-              <div style={C.h2}>Session Summary</div>
+        {/* ══════════════════════════════════════════════════════════════
+            SCREEN 4 — RESULTS
+        ══════════════════════════════════════════════════════════════ */}
+        {screen==="s4_results" && (
+          <div className="fade">
+            {/* Summary bar */}
+            <div style={s.summaryBar}>
+              <div style={s.summaryLeft}>
+                <div style={s.summaryTitle}>Session Complete</div>
+                <div style={s.summarySub}>{sitInfo?.label} · {stateCode} · {transcript.length} spoken moments</div>
+              </div>
+              <button style={s.newSessionBtn} onClick={reset}>New Session</button>
             </div>
 
-            {/* Stats */}
-            <div style={C.stats}>
-              <Stat v={suggestions.length}                                     l="SUGGESTIONS" c="#4f6ef7" />
-              <Stat v={suggestions.filter(s=>s.urgency==="red").length}        l="CRITICAL"    c="#ff2d2d" />
-              <Stat v={suggestions.filter(s=>s.urgency==="yellow").length}     l="CAUTION"     c="#ffb300" />
-              <Stat v={docFindings.length}                                      l="DOCS SCANNED" c="#a78bfa" />
+            {/* Stat chips */}
+            <div style={s.statRow}>
+              <StatChip n={suggestions.length}                                 label="Suggestions"  color={P.blue}  />
+              <StatChip n={suggestions.filter(s=>s.urgency==="red").length}    label="Critical"     color={P.red}   />
+              <StatChip n={suggestions.filter(s=>s.urgency==="yellow").length} label="Caution"      color={P.amber} />
+              <StatChip n={docFindings.length}                                  label="Docs Scanned" color={P.green} />
             </div>
 
-            {/* Document findings summary */}
-            {docFindings.length > 0 && (
-              <div style={{marginBottom:20}}>
-                <Label n="" t="Documents Scanned" />
-                {docFindings.map((d,i) => <DocCard key={i} result={d} compact />)}
+            {/* ── Action cards row ── */}
+            <div style={s.actionGrid}>
+
+              {/* Upload Image */}
+              <label style={s.actionCard} className="actionCard">
+                <span style={s.actionIcon}>🖼</span>
+                <span style={s.actionTitle}>Scan Document</span>
+                <span style={s.actionDesc}>Upload a photo of a ticket, warrant, or notice for AI analysis</span>
+                {scanning
+                  ? <span style={s.actionLoading}>Scanning…</span>
+                  : <span style={s.actionCta}>Upload Image →</span>}
+                <input type="file" accept="image/*" style={{display:"none"}} onChange={handleImageUpload} disabled={scanning} />
+              </label>
+
+              {/* Upload Video */}
+              <label style={s.actionCard} className="actionCard">
+                <span style={s.actionIcon}>🎥</span>
+                <span style={s.actionTitle}>Analyze Video</span>
+                <span style={s.actionDesc}>Upload dashcam or CCTV footage for AI evidence analysis</span>
+                {videoAnalyzing
+                  ? <span style={s.actionLoading}>Analyzing…</span>
+                  : <span style={s.actionCta}>Upload Video →</span>}
+                <input type="file" accept="video/*" style={{display:"none"}} onChange={handleVideoUpload} disabled={videoAnalyzing} />
+              </label>
+
+              {/* Download PDF */}
+              <button style={s.actionCard} className="actionCard" onClick={downloadReport} disabled={reportLoading}>
+                <span style={s.actionIcon}>📄</span>
+                <span style={s.actionTitle}>Download Report</span>
+                <span style={s.actionDesc}>Generate a professional PDF legal report for your attorney</span>
+                {reportLoading
+                  ? <span style={s.actionLoading}>Generating…</span>
+                  : <span style={s.actionCta}>{reportReady?"Download Again →":"Generate PDF →"}</span>}
+              </button>
+
+              {/* Find Lawyer */}
+              <button style={s.actionCard} className="actionCard"
+                onClick={() => { setShowLawyers(p=>!p); setActiveTab("lawyers"); }}>
+                <span style={s.actionIcon}>⚖</span>
+                <span style={s.actionTitle}>Find a Lawyer</span>
+                <span style={s.actionDesc}>Matched {sitInfo?.label} attorneys in {stateCode}</span>
+                <span style={s.actionCta}>{showLawyers?"Hide Lawyers":"View Matches →"}</span>
+              </button>
+
+            </div>
+
+            {error && <ErrBanner msg={error} />}
+
+            {/* ── Tabs ── */}
+            <div style={s.tabBar}>
+              {[
+                { id:"suggestions", label:`Suggestions (${suggestions.length})` },
+                { id:"document",    label:`Documents (${docFindings.length})` },
+                { id:"video",       label:"Video Analysis" },
+                { id:"lawyers",     label:"Lawyers" },
+              ].map(tab => (
+                <button key={tab.id} style={{...s.tab, ...(activeTab===tab.id?s.tabActive:{})}}
+                  onClick={() => setActiveTab(tab.id)}>
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Tab: Suggestions */}
+            {activeTab==="suggestions" && (
+              <div>
+                {suggestions.length===0
+                  ? <div style={s.emptyTab}>No legally significant moments were detected during this session.</div>
+                  : suggestions.map(sug => <SugCard key={sug.id} s={sug} showTrigger />)}
               </div>
             )}
 
-            {/* Suggestions */}
-            <div style={{marginBottom:20}}>
-              {suggestions.length===0
-                ? <div style={C.noSug}>No legally significant moments detected.</div>
-                : suggestions.map(s => <SugCard key={s.id} s={s} showTrigger />)
-              }
-            </div>
-
-            {error && <ErrBar msg={error} />}
-
-            {/* REPORT BUTTON — centerpiece of done screen */}
-            <div style={C.reportSection}>
-              <div style={C.reportTitle}>📄 POST-ENCOUNTER LEGAL REPORT</div>
-              <div style={C.reportSub}>
-                AI generates a professional PDF with incident summary, rights assessment,
-                timeline, document findings, and recommended next steps for your attorney.
+            {/* Tab: Documents */}
+            {activeTab==="document" && (
+              <div>
+                {docFindings.length===0 ? (
+                  <div style={s.emptyTab}>
+                    No documents scanned yet. Use the "Scan Document" button above to upload an image of a ticket, warrant, or notice.
+                  </div>
+                ) : docFindings.map((d,i) => <DocCard key={i} result={d} />)}
               </div>
-              <button
-                style={C.reportBtn(reportLoading)}
-                disabled={reportLoading}
-                onClick={downloadReport}
-                className="pb"
-              >
-                {reportLoading ? "⏳ GENERATING REPORT..." :
-                 reportReady   ? "✅ DOWNLOAD AGAIN"      :
-                                 "📥 GENERATE & DOWNLOAD PDF REPORT"}
-              </button>
-            </div>
+            )}
 
-            {/* LAWYER FINDER */}
-            {showLawyers && (
-              <div style={{marginBottom:20}}>
-                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
-                  <div>
-                    <div style={{fontSize:14,fontWeight:700,letterSpacing:.5,color:"#e8e6df",marginBottom:3}}>
-                      ⚖️ RECOMMENDED LAWYERS
-                    </div>
-                    <div style={{fontSize:11,color:"#6b7280"}}>
-                      {situation?.replace(/_/g," ")} specialists · {stateCode} · Sorted by rating
+            {/* Tab: Video */}
+            {activeTab==="video" && (
+              <div>
+                {videoAnalyzing && (
+                  <div style={s.analyzingBox}>
+                    <div style={s.analyzingSpinner} className="spin" />
+                    <div>
+                      <div style={{fontSize:14,fontWeight:600,color:P.navy,marginBottom:4}}>Analyzing video footage…</div>
+                      <div style={{fontSize:12,color:P.slate}}>{videoName}</div>
+                      <div style={{fontSize:12,color:P.slateL,marginTop:4}}>AI is reviewing the footage for rights violations and key moments. This may take 20–40 seconds.</div>
                     </div>
                   </div>
-                  <button onClick={()=>setShowLawyers(false)}
-                    style={{background:"none",border:"none",color:"#4b5563",cursor:"pointer",fontSize:13,
-                      fontFamily:"'DM Mono',monospace"}}>
-                    hide ✕
-                  </button>
+                )}
+                {!videoResult && !videoAnalyzing && (
+                  <div style={s.emptyTab}>
+                    <div style={{fontSize:32,marginBottom:12}}>🎥</div>
+                    <div style={{fontSize:14,fontWeight:600,color:P.navy,marginBottom:8}}>Upload video footage for AI analysis</div>
+                    <div style={{fontSize:13,color:P.slate,marginBottom:16,lineHeight:1.6}}>
+                      Supports dashcam recordings, CCTV footage, or any video of the encounter.
+                      AI will analyze for rights violations, use of force, procedure compliance, and key timestamps.
+                    </div>
+                    <label style={s.uploadVideoBtn} className="primaryBtn">
+                      Choose Video File
+                      <input type="file" accept="video/*" style={{display:"none"}} onChange={handleVideoUpload} />
+                    </label>
+                  </div>
+                )}
+                {videoResult && !videoAnalyzing && <VideoCard result={videoResult} filename={videoName} />}
+              </div>
+            )}
+
+            {/* Tab: Lawyers */}
+            {activeTab==="lawyers" && (
+              <div>
+                <div style={s.lawyerHeader}>
+                  <div style={{fontSize:14,fontWeight:600,color:P.navy}}>{sitInfo?.label} Attorneys in {stateCode}</div>
+                  <div style={{fontSize:12,color:P.slate,marginTop:3}}>Sorted by rating · Click Contact to send report via email</div>
                 </div>
                 {getLawyers(situation, stateCode).map((l,i) => (
-                  <LawyerCard key={i} lawyer={l} onContact={()=>contactLawyer(l)} />
+                  <LawyerCard key={i} lawyer={l} onContact={() => contactLawyer(l)} />
                 ))}
-                <div style={{fontSize:10,color:"#374151",textAlign:"center",marginTop:8}}>
-                  ℹ️ Lawyer profiles are illustrative examples. Verify credentials independently.
+                <div style={s.lawyerDisclaim}>
+                  Lawyer profiles shown are illustrative examples. Verify credentials independently before engaging counsel.
                 </div>
               </div>
             )}
 
-            {!showLawyers && reportReady && (
-              <button onClick={()=>setShowLawyers(true)}
-                style={{width:"100%",padding:14,background:"#0f1118",border:"1px solid #2a2d45",
-                  borderRadius:8,color:"#9ca3af",fontSize:13,fontWeight:700,cursor:"pointer",
-                  fontFamily:"'DM Mono',monospace",marginBottom:16}}>
-                ⚖️ FIND A LAWYER FOR MY SITUATION
-              </button>
-            )}
-
-            <button style={{...C.primBtn(false), marginTop:0}} onClick={reset} className="pb">
-              START NEW SESSION
-            </button>
-
-            <div style={C.disclaim}>
-              ⚠️ This tool provides general legal information only — not legal advice.<br />
-              Always consult a licensed attorney for your specific situation.
+            <div style={s.disclaimer}>
+              This tool provides general legal information only — not legal advice. Always consult a licensed attorney for your specific situation.
             </div>
           </div>
         )}
@@ -664,444 +711,431 @@ Thank you for your time.
   );
 }
 
-// ── Sub-components ────────────────────────────────────────────────────────
-function SugCard({ s, showTrigger }) {
-  const u = UX[s.urgency] || UX.green;
+// ─── Sub-components ────────────────────────────────────────────────────────
+
+function SugCard({ s: sug, showTrigger }) {
+  const u = URGENCY[sug.urgency] || URGENCY.green;
   return (
-    <div className="sc" style={{background:u.bg,border:`1px solid ${u.border}`,borderRadius:10,
-      padding:"14px 16px",marginBottom:12,boxShadow:u.glow}}>
-      <span style={{display:"inline-block",background:u.badge,borderRadius:3,padding:"2px 8px",
-        fontSize:10,fontWeight:700,letterSpacing:1.5,color:"#000",marginBottom:7}}>{u.label}</span>
-      <div style={{fontSize:14,fontWeight:600,lineHeight:1.5,marginBottom:5,color:"#e8e6df"}}>{s.suggestion}</div>
-      <div style={{fontSize:11,color:"#6b7280"}}>📖 {s.law}</div>
-      {showTrigger && s.trigger && <div style={{fontSize:11,color:"#374151",marginTop:3}}>Triggered: "{s.trigger}"</div>}
-      <div style={{fontSize:10,color:"#374151",marginTop:2}}>{s.time}</div>
-    </div>
-  );
-}
-
-function PointsBreakdown({ pa }) {
-  if (!pa) return null;
-
-  const riskColors = { red:"#ff2d2d", yellow:"#ffb300", green:"#00e576" };
-  const riskBg     = { red:"rgba(255,45,45,0.08)", yellow:"rgba(255,179,0,0.08)", green:"rgba(0,229,118,0.08)" };
-  const rc = riskColors[pa.risk] || "#ffb300";
-  const rb = riskBg[pa.risk]     || "rgba(255,179,0,0.08)";
-
-  const susp = pa.suspension_threshold;
-  const pct  = susp ? Math.min(100, Math.round((pa.total_points / susp) * 100)) : 0;
-  const barColor = pct >= 100 ? "#ff2d2d" : pct >= 70 ? "#ffb300" : "#4f6ef7";
-
-  return (
-    <div style={{background:"#0b0d14",border:`1px solid ${rc}`,borderRadius:10,
-      padding:"16px 18px",marginTop:12,boxShadow:`0 0 16px ${rc}33`}}>
-
-      {/* Header */}
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
-        <div style={{display:"flex",alignItems:"center",gap:8}}>
-          <span style={{fontSize:18}}>🚗</span>
-          <span style={{fontSize:13,fontWeight:700,color:"#e8e6df",letterSpacing:.5}}>DMV POINTS ANALYSIS</span>
-        </div>
-        <div style={{background:rc,borderRadius:4,padding:"2px 10px",fontSize:10,fontWeight:700,color:"#000",letterSpacing:1}}>
-          {pa.state_name.toUpperCase()}
-        </div>
+    <div style={{...s2.sugCard, background:u.bg, borderColor:u.border}}>
+      <div style={s2.sugTop}>
+        <span style={{...s2.sugBadge, background:u.bg, color:u.text, border:`1px solid ${u.border}`}}>
+          {u.icon} {u.label}
+        </span>
+        <span style={s2.sugTime}>{sug.time}</span>
       </div>
-
-      {/* Big points number */}
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:14}}>
-        <div style={{background:rb,border:`1px solid ${rc}`,borderRadius:8,padding:"12px 8px",textAlign:"center"}}>
-          <div style={{fontSize:34,fontWeight:700,color:rc,lineHeight:1}}>{pa.total_points}</div>
-          <div style={{fontSize:9,color:"#6b7280",letterSpacing:1,marginTop:3}}>TOTAL POINTS</div>
-        </div>
-        <div style={{background:"#0f1118",border:"1px solid #1e2030",borderRadius:8,padding:"12px 8px",textAlign:"center"}}>
-          <div style={{fontSize:34,fontWeight:700,color:"#e8e6df",lineHeight:1}}>{susp || "—"}</div>
-          <div style={{fontSize:9,color:"#6b7280",letterSpacing:1,marginTop:3}}>SUSPENSION AT</div>
-        </div>
-        <div style={{background:"#0f1118",border:"1px solid #1e2030",borderRadius:8,padding:"12px 8px",textAlign:"center"}}>
-          <div style={{fontSize:34,fontWeight:700,color: pa.points_to_suspension===0?"#ff2d2d":"#00e576",lineHeight:1}}>
-            {pa.points_to_suspension !== null ? pa.points_to_suspension : "—"}
-          </div>
-          <div style={{fontSize:9,color:"#6b7280",letterSpacing:1,marginTop:3}}>POINTS LEFT</div>
-        </div>
-      </div>
-
-      {/* Progress bar toward suspension */}
-      {susp && (
-        <div style={{marginBottom:14}}>
-          <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
-            <span style={{fontSize:10,color:"#4b5563",letterSpacing:1}}>PROGRESS TO SUSPENSION</span>
-            <span style={{fontSize:10,color:barColor,fontWeight:700}}>{pct}%</span>
-          </div>
-          <div style={{background:"#1a1d2e",borderRadius:4,height:8,overflow:"hidden"}}>
-            <div style={{width:`${pct}%`,height:"100%",background:barColor,borderRadius:4,
-              transition:"width .5s ease",boxShadow:`0 0 8px ${barColor}88`}} />
-          </div>
-          <div style={{display:"flex",justifyContent:"space-between",marginTop:3}}>
-            <span style={{fontSize:9,color:"#374151"}}>0</span>
-            <span style={{fontSize:9,color:"#374151"}}>{susp} pts = suspension</span>
-          </div>
-        </div>
-      )}
-
-      {/* Consequence warning */}
-      {pa.worst_consequence && (
-        <div style={{background:"rgba(255,45,45,0.1)",border:"1px solid #ff2d2d",borderRadius:6,
-          padding:"8px 12px",marginBottom:12,fontSize:12,fontWeight:700,color:"#ff2d2d"}}>
-          ⚠️ {pa.worst_consequence}
-        </div>
-      )}
-
-      {/* Next threshold */}
-      {pa.next_threshold && !pa.worst_consequence && (
-        <div style={{background:"rgba(255,179,0,0.08)",border:"1px solid #ffb300",borderRadius:6,
-          padding:"8px 12px",marginBottom:12,fontSize:12,color:"#ffb300"}}>
-          ⚡ {pa.next_threshold.points - pa.total_points} more point(s) → {pa.next_threshold.consequence}
-        </div>
-      )}
-
-      {/* Per-violation breakdown table */}
-      <div style={{marginBottom:12}}>
-        <div style={{fontSize:10,letterSpacing:1.5,color:"#4b5563",marginBottom:8}}>VIOLATION BREAKDOWN</div>
-        {pa.breakdown.map((v,i) => (
-          <div key={i} style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",
-            padding:"8px 10px",background: i%2===0?"#0f1118":"#0b0d14",
-            borderRadius:6,marginBottom:3}}>
-            <div style={{flex:1}}>
-              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:2}}>
-                <span style={{fontSize:11,fontWeight:700,color:"#a5b4fc",fontFamily:"'DM Mono',monospace"}}>
-                  {v.code}
-                </span>
-                {!v.found_in_db && (
-                  <span style={{fontSize:9,background:"#374151",borderRadius:3,padding:"1px 5px",color:"#6b7280"}}>
-                    NOT IN DB
-                  </span>
-                )}
-              </div>
-              <div style={{fontSize:12,color:"#9ca3af"}}>{v.name}</div>
-              {v.note && <div style={{fontSize:10,color:"#4b5563",marginTop:2}}>ℹ {v.note}</div>}
-              {v.fine_range && v.fine_range !== "unknown" && (
-                <div style={{fontSize:10,color:"#374151",marginTop:2}}>Fine: {v.fine_range}</div>
-              )}
-            </div>
-            <div style={{marginLeft:12,textAlign:"right",flexShrink:0}}>
-              <div style={{fontSize:20,fontWeight:700,
-                color: v.points===0?"#6b7280":v.points>=6?"#ff2d2d":v.points>=4?"#ffb300":"#ffb300",
-                lineHeight:1}}>{v.points}</div>
-              <div style={{fontSize:9,color:"#4b5563"}}>pts</div>
-            </div>
-          </div>
-        ))}
-        {/* Total row */}
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
-          padding:"10px 10px",background:"#1a1d2e",borderRadius:6,marginTop:4,
-          border:`1px solid ${rc}`}}>
-          <span style={{fontSize:12,fontWeight:700,color:"#e8e6df",letterSpacing:.5}}>TOTAL</span>
-          <div style={{textAlign:"right"}}>
-            <span style={{fontSize:22,fontWeight:700,color:rc}}>{pa.total_points}</span>
-            <span style={{fontSize:11,color:rc,marginLeft:4}}>pts</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Surcharge info */}
-      {pa.surcharge_info && (
-        <div style={{fontSize:11,color:"#6b7280",marginBottom:10,padding:"6px 10px",
-          background:"#0f1118",borderRadius:6}}>
-          💰 Surcharge: {pa.surcharge_info}
-        </div>
-      )}
-
-      {/* Contest recommendation */}
-      {pa.contest_recommended && (
-        <div style={{background:"rgba(79,110,247,0.1)",border:"1px solid #4f6ef7",
-          borderRadius:6,padding:"10px 12px",fontSize:12,color:"#a5b4fc",lineHeight:1.5}}>
-          ⚖️ <strong>Consider contesting:</strong> {pa.contest_reason}
-        </div>
-      )}
-
-      {/* Duration note */}
-      {pa.points_duration && (
-        <div style={{fontSize:10,color:"#374151",marginTop:10,textAlign:"center"}}>
-          Points stay on record for {pa.points_duration} year(s) in {pa.state_name}
-        </div>
+      <div style={s2.sugText}>{sug.suggestion}</div>
+      <div style={s2.sugLaw}>📖 {sug.law}</div>
+      {showTrigger && sug.trigger && (
+        <div style={s2.sugTrigger}>Triggered by: "{sug.trigger}"</div>
       )}
     </div>
   );
 }
 
-function DocCard({ result, onDismiss, compact }) {
-  const u   = UX[result.urgency] || UX.yellow;
-  const typ = DOC_LABELS[result.document_type] || result.document_type || "Document";
-  const pa  = result.points_analysis;
+function DocCard({ result }) {
+  const u    = URGENCY[result.urgency] || URGENCY.yellow;
+  const typ  = DOC_LABELS[result.document_type] || "Document";
+  const pa   = result.points_analysis;
 
   return (
-    <div style={{background:u.bg,border:`1px solid ${u.border}`,borderRadius:10,
-      padding:compact?"12px 14px":"16px 18px",marginBottom:12,boxShadow:u.glow}}>
-      {/* Header */}
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
-        <div style={{display:"flex",alignItems:"center",gap:8}}>
+    <div style={{...s2.card, borderColor:u.border}}>
+      <div style={s2.cardHeader}>
+        <div style={s2.cardTitleRow}>
           <span style={{fontSize:18}}>📄</span>
-          <span style={{fontSize:13,fontWeight:700,color:"#e8e6df"}}>{typ.toUpperCase()}</span>
-          <span style={{display:"inline-block",background:u.badge,borderRadius:3,padding:"1px 7px",
-            fontSize:10,fontWeight:700,color:"#000"}}>{u.label}</span>
-          {/* Points badge on header */}
+          <span style={s2.cardTitle}>{typ}</span>
+          <span style={{...s2.badge, background:u.bg, color:u.text, border:`1px solid ${u.border}`}}>
+            {u.icon} {u.label}
+          </span>
           {pa && pa.total_points > 0 && (
-            <span style={{display:"inline-block",
-              background: pa.risk==="red"?"#ff2d2d":pa.risk==="yellow"?"#ffb300":"#00e576",
-              borderRadius:3,padding:"1px 7px",fontSize:10,fontWeight:700,color:"#000"}}>
-              {pa.total_points} PTS
+            <span style={{...s2.badge, background:P.amberBg, color:P.amber, border:`1px solid ${P.amberBd}`}}>
+              {pa.total_points} pts
             </span>
           )}
         </div>
-        {onDismiss && (
-          <button onClick={onDismiss} style={{background:"none",border:"none",
-            color:"#4b5563",cursor:"pointer",fontSize:16}}>✕</button>
-        )}
+      </div>
+      <p style={s2.cardSummary}>{result.summary}</p>
+
+      {result.is_judicial_warrant===false && result.document_type?.includes("warrant") && (
+        <div style={s2.warrantAlert}>
+          ⚠ This is NOT a judicial warrant — they cannot enter your home without your consent.
+        </div>
+      )}
+
+      {result.findings?.length > 0 && (
+        <div style={s2.section}>
+          <div style={s2.sectionLabel}>Findings</div>
+          {result.findings.map((f,i) => <div key={i} style={s2.bullet}>• {f}</div>)}
+        </div>
+      )}
+
+      {result.actions?.length > 0 && (
+        <div style={s2.section}>
+          <div style={s2.sectionLabel}>What to do</div>
+          {result.actions.map((a,i) => <div key={i} style={{...s2.bullet, color:P.blue, fontWeight:500}}>→ {a}</div>)}
+        </div>
+      )}
+
+      {result.recommended_next_step && (
+        <div style={s2.nextStep}>💡 {result.recommended_next_step}</div>
+      )}
+
+      {pa && pa.total_points > 0 && (
+        <PointsPanel pa={pa} />
+      )}
+    </div>
+  );
+}
+
+function PointsPanel({ pa }) {
+  const susp = pa.suspension_threshold;
+  const pct  = susp ? Math.min(100, Math.round((pa.total_points/susp)*100)) : 0;
+  const barC = pct>=100?P.red:pct>=70?P.amber:P.blue;
+
+  return (
+    <div style={s2.pointsPanel}>
+      <div style={s2.pointsHeader}>🚗 DMV Points — {pa.state_name}</div>
+
+      <div style={s2.pointsStats}>
+        <div style={s2.pointsStat}>
+          <div style={{...s2.pointsBig, color:pct>=70?P.red:P.amber}}>{pa.total_points}</div>
+          <div style={s2.pointsStatLabel}>Total Points</div>
+        </div>
+        <div style={s2.pointsStat}>
+          <div style={s2.pointsBig}>{susp||"—"}</div>
+          <div style={s2.pointsStatLabel}>Suspension At</div>
+        </div>
+        <div style={s2.pointsStat}>
+          <div style={{...s2.pointsBig, color:pa.points_to_suspension===0?P.red:P.green}}>
+            {pa.points_to_suspension ?? "—"}
+          </div>
+          <div style={s2.pointsStatLabel}>Points Left</div>
+        </div>
       </div>
 
-      <div style={{fontSize:13,color:"#e8e6df",marginBottom:8,lineHeight:1.5}}>{result.summary}</div>
-
-      {/* Warrant warning */}
-      {result.is_judicial_warrant===false && result.document_type?.includes("warrant") && (
-        <div style={{background:"rgba(255,45,45,0.15)",border:"1px solid #ff2d2d",borderRadius:6,
-          padding:"8px 12px",marginBottom:8,fontSize:12,fontWeight:700,color:"#ff2d2d"}}>
-          ⚠️ NOT a judicial warrant — they cannot enter your home without consent.
+      {susp && (
+        <div style={{marginBottom:12}}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+            <span style={{fontSize:11,color:P.slate}}>Progress to suspension</span>
+            <span style={{fontSize:11,fontWeight:600,color:barC}}>{pct}%</span>
+          </div>
+          <div style={{background:P.slateXL,borderRadius:4,height:6,overflow:"hidden"}}>
+            <div style={{width:`${pct}%`,height:"100%",background:barC,borderRadius:4,transition:"width .4s"}} />
+          </div>
         </div>
       )}
 
-      {/* Findings */}
-      {!compact && result.findings?.length > 0 && (
-        <div style={{marginBottom:8}}>
-          {result.findings.map((f,i) => (
-            <div key={i} style={{fontSize:12,color:"#9ca3af",marginBottom:3}}>• {f}</div>
+      {pa.worst_consequence && (
+        <div style={{...s2.warrantAlert, marginBottom:10}}>{pa.worst_consequence}</div>
+      )}
+
+      <div style={{marginBottom:10}}>
+        <div style={s2.sectionLabel}>Violation Breakdown</div>
+        {pa.breakdown.map((v,i) => (
+          <div key={i} style={{...s2.violationRow, background:i%2===0?P.bg:P.white}}>
+            <div style={{flex:1}}>
+              <div style={{fontSize:12,fontWeight:600,color:P.navy}}>{v.code} — {v.name}</div>
+              {v.fine_range && v.fine_range!=="unknown" && (
+                <div style={{fontSize:11,color:P.slateL}}>Fine: {v.fine_range}</div>
+              )}
+              {v.note && <div style={{fontSize:11,color:P.amber}}>ℹ {v.note}</div>}
+            </div>
+            <div style={{textAlign:"right",flexShrink:0,marginLeft:12}}>
+              <div style={{fontSize:20,fontWeight:700,color:v.points>=6?P.red:v.points>=4?P.amber:P.slate}}>
+                {v.points}
+              </div>
+              <div style={{fontSize:10,color:P.slateL}}>pts</div>
+            </div>
+          </div>
+        ))}
+        <div style={s2.violationTotal}>
+          <span style={{fontWeight:600,color:P.navy}}>Total</span>
+          <span style={{fontSize:18,fontWeight:700,color:pct>=70?P.red:P.amber}}>{pa.total_points} pts</span>
+        </div>
+      </div>
+
+      {pa.contest_recommended && (
+        <div style={s2.contestBox}>
+          ⚖ <strong>Consider contesting:</strong> {pa.contest_reason}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VideoCard({ result, filename }) {
+  const u = URGENCY[result.urgency] || URGENCY.yellow;
+  return (
+    <div style={{...s2.card, borderColor:u.border}}>
+      <div style={s2.cardHeader}>
+        <div style={s2.cardTitleRow}>
+          <span style={{fontSize:18}}>🎥</span>
+          <span style={s2.cardTitle}>{result.footage_type || "Video Analysis"}</span>
+          <span style={{...s2.badge, background:u.bg, color:u.text, border:`1px solid ${u.border}`}}>
+            {u.icon} {u.label}
+          </span>
+        </div>
+        {filename && <div style={{fontSize:11,color:P.slateL,marginTop:4}}>{filename}</div>}
+      </div>
+
+      <p style={s2.cardSummary}>{result.summary}</p>
+
+      {result.duration && (
+        <div style={{fontSize:12,color:P.slate,marginBottom:12}}>⏱ Duration: {result.duration}</div>
+      )}
+
+      {result.timeline?.length > 0 && (
+        <div style={s2.section}>
+          <div style={s2.sectionLabel}>Timeline of Events</div>
+          {result.timeline.map((e,i) => (
+            <div key={i} style={s2.timelineRow}>
+              <span style={s2.timelineTs}>{e.timestamp}</span>
+              <span style={{...s2.timelineDot, background:e.significant?P.amber:P.slateXL}} />
+              <span style={{fontSize:12,color:P.slate,flex:1}}>{e.event}</span>
+            </div>
           ))}
         </div>
       )}
 
-      {/* Actions */}
-      {result.actions?.length > 0 && (
-        <div style={{marginBottom:8}}>
-          <div style={{fontSize:10,letterSpacing:1.5,color:"#4b5563",marginBottom:5}}>WHAT TO DO</div>
-          {result.actions.map((a,i) => (
-            <div key={i} style={{fontSize:12,color:"#a5b4fc",marginBottom:3,fontWeight:600}}>→ {a}</div>
+      {result.violations_detected?.length > 0 && (
+        <div style={s2.section}>
+          <div style={s2.sectionLabel}>Potential Rights Violations</div>
+          {result.violations_detected.map((v,i) => (
+            <div key={i} style={{...s2.bullet, color:P.red, fontWeight:500}}>⚠ {v}</div>
           ))}
         </div>
       )}
 
-      {/* Recommended next step */}
+      {result.officer_conduct && (
+        <div style={s2.section}>
+          <div style={s2.sectionLabel}>Officer Conduct Assessment</div>
+          <p style={{fontSize:12,color:P.slate,margin:0,lineHeight:1.6}}>{result.officer_conduct}</p>
+        </div>
+      )}
+
+      {result.evidence_strength && (
+        <div style={s2.section}>
+          <div style={s2.sectionLabel}>Evidence Strength</div>
+          <div style={{...s2.badge, display:"inline-flex", background:P.blueBg, color:P.blue, border:`1px solid ${P.blueBd}`}}>
+            {result.evidence_strength}
+          </div>
+        </div>
+      )}
+
+      {result.key_observations?.length > 0 && (
+        <div style={s2.section}>
+          <div style={s2.sectionLabel}>Key Observations</div>
+          {result.key_observations.map((o,i) => <div key={i} style={s2.bullet}>• {o}</div>)}
+        </div>
+      )}
+
+      {result.recommended_actions?.length > 0 && (
+        <div style={s2.section}>
+          <div style={s2.sectionLabel}>Recommended Actions</div>
+          {result.recommended_actions.map((a,i) => (
+            <div key={i} style={{...s2.bullet, color:P.blue, fontWeight:500}}>→ {a}</div>
+          ))}
+        </div>
+      )}
+
       {result.recommended_next_step && (
-        <div style={{background:"rgba(79,110,247,0.1)",border:"1px solid #4f6ef7",
-          borderRadius:6,padding:"7px 10px",fontSize:12,color:"#a5b4fc",marginTop:4}}>
-          💡 {result.recommended_next_step}
-        </div>
-      )}
-
-      {/* Points breakdown — only show if not compact */}
-      {!compact && pa && <PointsBreakdown pa={pa} />}
-
-      {/* Compact: just show points total */}
-      {compact && pa && pa.total_points > 0 && (
-        <div style={{marginTop:8,fontSize:11,color:"#ffb300"}}>
-          🚗 {pa.total_points} DMV point(s) · {pa.state_name}
-          {pa.worst_consequence && ` · ${pa.worst_consequence}`}
-        </div>
+        <div style={s2.nextStep}>💡 {result.recommended_next_step}</div>
       )}
     </div>
-  );
-}
-
-
-function Label({ n, t }) {
-  return (
-    <div style={{fontSize:10,letterSpacing:2,color:"#4b5563",textTransform:"uppercase",marginBottom:12}}>
-      {n && <span style={{color:"#4f6ef7",marginRight:8}}>{n}</span>}{t}
-    </div>
-  );
-}
-
-function Stat({ v, l, c }) {
-  return (
-    <div style={{background:"#0f1118",border:"1px solid #1e2030",borderRadius:8,padding:"14px 8px",textAlign:"center"}}>
-      <div style={{fontSize:28,fontWeight:700,color:c,lineHeight:1}}>{v}</div>
-      <div style={{fontSize:9,color:"#4b5563",letterSpacing:1,marginTop:4}}>{l}</div>
-    </div>
-  );
-}
-
-function ErrBar({ msg }) {
-  return (
-    <div style={{background:"rgba(255,179,0,0.08)",border:"1px solid #ffb300",borderRadius:6,
-      padding:"9px 13px",fontSize:12,color:"#ffb300",marginBottom:14}}>⚠️ {msg}</div>
   );
 }
 
 function LawyerCard({ lawyer: l, onContact }) {
-  const stars = Math.round(l.rating);
   return (
-    <div className="lc" style={{background:"#0f1118",border:"1px solid #1e2030",borderRadius:12,
-      padding:"16px 18px",marginBottom:12,transition:"all .2s"}}>
-
-      {/* Top row */}
-      <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:10}}>
+    <div style={s2.lawyerCard} className="lawyerCard">
+      <div style={s2.lawyerTop}>
         <div style={{flex:1}}>
-          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
-            <span style={{fontSize:14,fontWeight:700,color:"#e8e6df"}}>{l.name}</span>
-            {l.free_consult && (
-              <span style={{background:"rgba(0,229,118,0.15)",border:"1px solid #00e576",
-                borderRadius:3,padding:"1px 6px",fontSize:9,fontWeight:700,color:"#00e576",letterSpacing:.5}}>
-                FREE CONSULT
-              </span>
-            )}
+          <div style={s2.lawyerName}>
+            {l.name}
+            {l.free_consult && <span style={s2.freeTag}>Free Consult</span>}
           </div>
-          <div style={{fontSize:12,color:"#6b7280",marginBottom:2}}>{l.firm}</div>
-          <div style={{fontSize:11,color:"#a5b4fc",marginBottom:4}}>{l.specialty}</div>
+          <div style={s2.lawyerFirm}>{l.firm}</div>
+          <div style={s2.lawyerSpec}>{l.specialty}</div>
         </div>
-
-        {/* Rating */}
-        <div style={{textAlign:"center",marginLeft:14,flexShrink:0}}>
-          <div style={{fontSize:22,fontWeight:700,color:"#ffb300",lineHeight:1}}>{l.rating}</div>
-          <div style={{fontSize:12,color:"#ffb300",letterSpacing:2}}>
-            {"★".repeat(stars)}{"☆".repeat(5-stars)}
-          </div>
-          <div style={{fontSize:9,color:"#4b5563",marginTop:2}}>{l.reviews} reviews</div>
+        <div style={s2.lawyerRating}>
+          <div style={s2.ratingNum}>{l.rating}</div>
+          <div style={s2.ratingStars}>{"★".repeat(Math.round(l.rating))}{"☆".repeat(5-Math.round(l.rating))}</div>
+          <div style={s2.ratingReviews}>{l.reviews} reviews</div>
         </div>
       </div>
 
-      {/* Meta row */}
-      <div style={{display:"flex",gap:16,marginBottom:12,flexWrap:"wrap"}}>
-        <div style={{display:"flex",alignItems:"center",gap:5}}>
-          <span style={{fontSize:12}}>📍</span>
-          <span style={{fontSize:11,color:"#6b7280"}}>{l.location}</span>
-        </div>
-        <div style={{display:"flex",alignItems:"center",gap:5}}>
-          <span style={{fontSize:12}}>⚖️</span>
-          <span style={{fontSize:11,color:"#6b7280"}}>{l.years} years experience</span>
-        </div>
-        <div style={{display:"flex",alignItems:"center",gap:5}}>
-          <span style={{fontSize:12}}>📞</span>
-          <span style={{fontSize:11,color:"#6b7280"}}>{l.phone}</span>
-        </div>
+      <div style={s2.lawyerMeta}>
+        <span>📍 {l.location}</span>
+        <span>⚖ {l.years} yrs exp</span>
+        <span>📞 {l.phone}</span>
       </div>
 
-      {/* Badge */}
-      <div style={{background:"#1a1d2e",borderRadius:6,padding:"6px 10px",
-        fontSize:11,color:"#9ca3af",marginBottom:12,display:"inline-block"}}>
-        🏅 {l.badge}
-      </div>
+      <div style={s2.lawyerBadge}>🏅 {l.badge}</div>
 
-      {/* Contact button */}
-      <div>
-        <button onClick={onContact}
-          style={{width:"100%",padding:"11px",background:"#4f6ef7",border:"none",borderRadius:8,
-            color:"#fff",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"'DM Mono',monospace",
-            display:"flex",alignItems:"center",justifyContent:"center",gap:8,letterSpacing:.5,
-            transition:"all .2s"}}>
-          <span>✉️</span>
-          CONTACT — SEND REPORT AS EMAIL
-        </button>
-        <div style={{fontSize:10,color:"#374151",textAlign:"center",marginTop:5}}>
-          Opens mail app with pre-filled draft · Attach the downloaded PDF manually
-        </div>
+      <button style={s2.contactBtn} onClick={onContact} className="contactBtn">
+        ✉ Contact — Send Report via Email
+      </button>
+      <div style={{fontSize:11,color:P.slateL,textAlign:"center",marginTop:6}}>
+        Opens your mail app with a pre-filled draft · Attach the downloaded PDF
       </div>
     </div>
   );
 }
 
-// Fallback client-side laws if backend offline
-function fallbackLaws(situation, state) {
-  const F=[
-    {id:"f1",state:"federal",situation:"arrest",       title:"Miranda Rights",        law_reference:"Miranda v. Arizona (1966)",  actionable_response:"Say: 'I invoke my right to remain silent. I want a lawyer.'",  urgency:"red"},
-    {id:"f2",state:"federal",situation:"search",       title:"4th Amendment",         law_reference:"Fourth Amendment",           actionable_response:"Say: 'I do not consent to this search.'",                        urgency:"yellow"},
-    {id:"f3",state:"federal",situation:"traffic_stop", title:"Free To Go?",           law_reference:"Florida v. Bostick (1991)", actionable_response:"Ask: 'Am I being detained or am I free to go?'",                 urgency:"green"},
-    {id:"f4",state:"federal",situation:"immigration",  title:"Right to Silence",      law_reference:"Fifth Amendment",            actionable_response:"Say: 'I exercise my right to remain silent.'",                   urgency:"red"},
-    {id:"f5",state:"federal",situation:"interrogation","title":"5th Amendment",       law_reference:"Fifth Amendment",            actionable_response:"Say: 'I invoke my Fifth Amendment right.'",                       urgency:"red"},
-    {id:"ny",state:"NY",     situation:"traffic_stop", title:"NY Traffic Stop",       law_reference:"NY VTL § 375",               actionable_response:"Provide license/registration. Decline further questions.",         urgency:"yellow"},
-    {id:"ca",state:"CA",     situation:"immigration",  title:"CA Sanctuary State",    law_reference:"SB 54",                      actionable_response:"'Under CA Values Act I need not answer immigration questions.'",   urgency:"green"},
-    {id:"tx",state:"TX",     situation:"traffic_stop", title:"TX Stop-and-Identify",  law_reference:"TX Penal Code § 38.02",      actionable_response:"Provide name and ID. Decline further questions.",                 urgency:"yellow"},
-    {id:"fl",state:"FL",     situation:"arrest",       title:"FL First Appearance",   law_reference:"FL Rule 3.130",              actionable_response:"Say: 'I invoke my right to silence and request an attorney.'",    urgency:"red"},
-  ];
-  return F.filter(l=>l.situation===situation&&(l.state===state||l.state==="federal")).slice(0,5);
+function ErrBanner({ msg }) {
+  return <div style={s2.errBanner}>⚠ {msg}</div>;
 }
 
-// ── Styles ────────────────────────────────────────────────────────────────
-const C = {
-  app:        { minHeight:"100vh",background:"#08090d",color:"#e8e6df",fontFamily:"'DM Mono','Courier New',monospace",display:"flex",flexDirection:"column",alignItems:"center" },
-  hdr:        { width:"100%",borderBottom:"1px solid #1e2030",padding:"15px 26px",display:"flex",alignItems:"center",justifyContent:"space-between",background:"#0b0d14",position:"sticky",top:0,zIndex:100 },
-  hdrL:       { display:"flex",alignItems:"center",gap:10 },
-  hdrR:       { display:"flex",alignItems:"center",gap:10 },
-  logo:       { fontSize:17,fontWeight:700,letterSpacing:-0.3 },
-  beta:       { background:"#1a1d2e",border:"1px solid #2a2d45",borderRadius:4,padding:"2px 7px",fontSize:9,color:"#6b7280",letterSpacing:1 },
-  dot:        { width:7,height:7,borderRadius:"50%",display:"inline-block" },
-  statusTxt:  { fontSize:10,color:"#4b5563" },
-  notlegal:   { fontSize:10,color:"#374151" },
-  main:       { width:"100%",maxWidth:600,padding:"34px 22px 60px" },
-  h1:         { fontSize:26,fontWeight:700,letterSpacing:-0.5,marginBottom:8 },
-  h2:         { fontSize:22,fontWeight:700,marginBottom:4 },
-  sub:        { fontSize:13,color:"#6b7280",lineHeight:1.7 },
-  sub2:       { fontSize:12,color:"#6b7280" },
-  tag:        { fontSize:10,color:"#4f6ef7",letterSpacing:2,marginBottom:6 },
-  grid2:      { display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:28 },
-  sCard:      sel=>({ background:sel?"#1a1d2e":"#0f1118",border:`1px solid ${sel?"#4f6ef7":"#1e2030"}`,borderRadius:10,padding:"15px 12px",cursor:"pointer",display:"flex",flexDirection:"column",gap:3,textAlign:"left",transition:"all .15s" }),
-  sCardLbl:   sel=>({ fontSize:13,fontWeight:600,color:sel?"#a5b4fc":"#9ca3af" }),
-  sCardDsc:   { fontSize:11,color:"#4b5563" },
-  stBtn:      sel=>({ background:sel?"#1a1d2e":"#0f1118",border:`1px solid ${sel?"#4f6ef7":"#1e2030"}`,borderRadius:6,padding:"10px 15px",cursor:"pointer",color:sel?"#a5b4fc":"#6b7280",fontSize:13,fontWeight:600,fontFamily:"'DM Mono',monospace",transition:"all .15s" }),
-  ta:         { width:"100%",background:"#0f1118",border:"1px solid #1e2030",borderRadius:8,padding:14,color:"#e8e6df",fontSize:13,fontFamily:"'DM Mono',monospace",resize:"vertical",minHeight:80,outline:"none",boxSizing:"border-box",marginBottom:20 },
-  primBtn:    dis=>({ width:"100%",padding:16,background:dis?"#1a1d2e":"#4f6ef7",border:"none",borderRadius:8,color:dis?"#4b5563":"#fff",fontSize:14,fontWeight:700,fontFamily:"'DM Mono',monospace",letterSpacing:.5,cursor:dis?"not-allowed":"pointer",transition:"all .2s" }),
-  lawBox:     { background:"#0f1118",border:"1px solid #1e2030",borderRadius:12,padding:20,marginBottom:20 },
-  lawRow:     { marginBottom:15,paddingBottom:15,borderBottom:"1px solid #1e2030" },
-  lawTop:     { display:"flex",alignItems:"center",gap:8,marginBottom:3 },
-  lawTitle:   { fontSize:12,fontWeight:600,flex:1 },
-  lawSt:      { fontSize:10,color:"#4b5563",background:"#1a1d2e",borderRadius:3,padding:"1px 6px" },
-  lawRef:     { fontSize:11,color:"#4b5563",marginBottom:3 },
-  lawAct:     { fontSize:12,color:"#a5b4fc",lineHeight:1.5 },
-  listenIdle: { width:"100%",padding:18,background:"#0f1118",border:"2px solid #2a2d45",borderRadius:12,color:"#e8e6df",fontSize:16,fontWeight:700,fontFamily:"'DM Mono',monospace",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:10,marginBottom:10,transition:"all .2s" },
-  listenActive:{ width:"100%",padding:18,background:"#ff2d2d",border:"2px solid #ff2d2d",borderRadius:12,color:"#fff",fontSize:16,fontWeight:700,fontFamily:"'DM Mono',monospace",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:10,boxShadow:"0 0 28px rgba(255,45,45,0.4)",marginBottom:10,transition:"all .2s" },
-  backBtn:    { width:"100%",padding:11,background:"transparent",border:"1px solid #1e2030",borderRadius:8,color:"#4b5563",fontSize:12,cursor:"pointer",fontFamily:"'DM Mono',monospace" },
-  listenBar:  { display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:18 },
-  liveLabel:  { fontSize:11,letterSpacing:2,color:"#ff2d2d" },
-  thinking:   { fontSize:11,color:"#4b5563" },
-  scanBtn:    { background:"#1a1d2e",border:"1px solid #4f6ef7",borderRadius:6,padding:"7px 13px",color:"#a5b4fc",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"'DM Mono',monospace",letterSpacing:.5 },
-  feed:       { minHeight:260,marginBottom:14 },
-  empty:      { textAlign:"center",padding:"55px 0",color:"#2a2d45" },
-  emptyTxt:   { fontSize:13,letterSpacing:.5,marginBottom:6 },
-  emptyHint:  { fontSize:11,color:"#1e2030" },
-  txBox:      { background:"#0b0d14",border:"1px solid #1e2030",borderRadius:8,padding:"11px 15px",marginTop:14 },
-  txLabel:    { fontSize:10,color:"#374151",letterSpacing:1.5,marginBottom:7 },
-  txLine:     { fontSize:11,color:"#4b5563",marginBottom:3,display:"flex",gap:8 },
-  txTime:     { color:"#2a2d45",flexShrink:0 },
-  stats:      { display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:10,marginBottom:22 },
-  noSug:      { textAlign:"center",padding:36,color:"#4b5563",fontSize:13 },
-  reportSection: { background:"#0f1118",border:"1px solid #4f6ef7",borderRadius:12,padding:22,marginBottom:16 },
-  reportTitle:   { fontSize:14,fontWeight:700,letterSpacing:.5,marginBottom:8,color:"#e8e6df" },
-  reportSub:     { fontSize:12,color:"#6b7280",lineHeight:1.7,marginBottom:16 },
-  reportBtn:  ld=>({ width:"100%",padding:16,background:ld?"#1a1d2e":"#4f6ef7",border:"none",borderRadius:8,color:ld?"#4b5563":"#fff",fontSize:13,fontWeight:700,fontFamily:"'DM Mono',monospace",letterSpacing:.5,cursor:ld?"not-allowed":"pointer",transition:"all .2s" }),
-  disclaim:   { textAlign:"center",marginTop:22,fontSize:11,color:"#374151",lineHeight:1.8 },
-  // Camera modal
-  cameraModal:{ position:"fixed",inset:0,background:"rgba(0,0,0,0.85)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200 },
-  cameraBox:  { background:"#0f1118",border:"1px solid #1e2030",borderRadius:14,width:"min(94vw,440px)",overflow:"hidden" },
-  camHeader:  { display:"flex",alignItems:"center",justifyContent:"space-between",padding:"13px 16px",borderBottom:"1px solid #1e2030" },
-  camClose:   { background:"none",border:"none",color:"#6b7280",fontSize:18,cursor:"pointer" },
-  video:      { width:"100%",display:"block",background:"#000" },
-  captureBtn: { flex:1,padding:12,background:"#4f6ef7",border:"none",borderRadius:8,color:"#fff",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"'DM Mono',monospace" },
-  uploadBtn:  { padding:12,background:"#1a1d2e",border:"1px solid #2a2d45",borderRadius:8,color:"#9ca3af",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"'DM Mono',monospace" },
-  scanningMsg:{ padding:12,textAlign:"center",fontSize:12,color:"#a5b4fc",letterSpacing:1 },
+function StatChip({ n, label, color }) {
+  return (
+    <div style={{...s2.statChip, borderColor:color+"33"}}>
+      <div style={{fontSize:22,fontWeight:700,color,lineHeight:1}}>{n}</div>
+      <div style={{fontSize:10,color:P.slate,marginTop:3,letterSpacing:.3}}>{label}</div>
+    </div>
+  );
+}
+
+// ─── Styles ────────────────────────────────────────────────────────────────
+const s = {
+  app:          { minHeight:"100vh", background:P.bg, color:P.navy, fontFamily:"Inter, system-ui, sans-serif" },
+  header:       { background:P.white, borderBottom:`1px solid ${P.border}`, padding:"14px 24px", display:"flex", alignItems:"center", justifyContent:"space-between", position:"sticky", top:0, zIndex:100 },
+  headerLeft:   { display:"flex", alignItems:"center", gap:12 },
+  headerLogo:   { fontSize:16, fontWeight:700, color:P.navy, letterSpacing:-.3 },
+  headerPill:   { background:P.blueBg, color:P.blue, border:`1px solid ${P.blueBd}`, borderRadius:20, padding:"3px 10px", fontSize:11, fontWeight:500 },
+  headerRight:  { display:"flex", alignItems:"center", gap:6 },
+  statusDot:    { width:7, height:7, borderRadius:"50%", display:"inline-block" },
+  statusText:   { fontSize:11, color:P.slateL },
+  stepBar:      { background:P.white, borderBottom:`1px solid ${P.border}`, padding:"16px 24px", display:"flex", alignItems:"center", justifyContent:"center", gap:0 },
+  stepItem:     { display:"flex", alignItems:"center", gap:6 },
+  stepCircle:   { width:26, height:26, borderRadius:"50%", display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:700, flexShrink:0 },
+  stepLabel:    { fontSize:11, fontWeight:500, marginRight:6 },
+  stepLine:     { width:40, height:2, marginRight:6, flexShrink:0 },
+  main:         { maxWidth:640, margin:"0 auto", padding:"28px 20px 60px" },
+  pageHeader:   { marginBottom:28 },
+  h1:           { fontSize:24, fontWeight:700, color:P.navy, marginBottom:8, letterSpacing:-.4 },
+  subtext:      { fontSize:14, color:P.slate, lineHeight:1.6, margin:0 },
+  situationBadge: { display:"inline-flex", alignItems:"center", gap:6, background:P.blueBg, border:`1px solid ${P.blueBd}`, borderRadius:20, padding:"4px 12px", fontSize:12, fontWeight:500, color:P.blue, marginBottom:12 },
+  situationGrid:{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:24 },
+  sitCard:      { background:P.white, border:`1.5px solid ${P.border}`, borderRadius:12, padding:"20px 16px", cursor:"pointer", display:"flex", flexDirection:"column", gap:4, textAlign:"left", transition:"all .15s" },
+  sitCardActive:{ borderColor:P.blue, background:P.blueBg },
+  sitIcon:      { fontSize:24, marginBottom:4 },
+  sitLabel:     { fontSize:14, fontWeight:600, color:P.navy },
+  sitDesc:      { fontSize:12, color:P.slateL, lineHeight:1.4 },
+  sitArrow:     { fontSize:16, color:P.blue, marginTop:4 },
+  stateGrid:    { display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:8, marginBottom:24 },
+  stateBtn:     { background:P.white, border:`1.5px solid ${P.border}`, borderRadius:10, padding:"14px 8px", cursor:"pointer", display:"flex", flexDirection:"column", alignItems:"center", gap:3, transition:"all .15s" },
+  stateBtnActive:{ borderColor:P.blue, background:P.blueBg },
+  stateName:    { fontSize:15, fontWeight:700, color:P.navy },
+  stateLabel:   { fontSize:9, color:P.slateL, textAlign:"center" },
+  descSection:  { marginBottom:20 },
+  label:        { display:"block", fontSize:12, fontWeight:500, color:P.slate, marginBottom:6 },
+  textarea:     { width:"100%", background:P.white, border:`1px solid ${P.border}`, borderRadius:8, padding:"10px 12px", color:P.navy, fontSize:13, fontFamily:"Inter, system-ui, sans-serif", resize:"vertical", minHeight:72, outline:"none", boxSizing:"border-box", lineHeight:1.5 },
+  primaryBtn:   { width:"100%", padding:"14px", background:P.blue, border:"none", borderRadius:8, color:P.white, fontSize:14, fontWeight:600, cursor:"pointer", fontFamily:"Inter, system-ui, sans-serif", transition:"all .15s" },
+  backBtn:      { background:"none", border:"none", color:P.blue, fontSize:13, fontWeight:500, cursor:"pointer", padding:"0 0 16px", display:"block", fontFamily:"Inter, system-ui, sans-serif" },
+  listenHeader: { display:"flex", alignItems:"flex-start", justifyContent:"space-between", marginBottom:20 },
+  listenTitle:  { display:"flex", alignItems:"center", gap:8, marginBottom:4 },
+  liveDot:      { width:9, height:9, borderRadius:"50%", background:P.red, display:"inline-block", flexShrink:0 },
+  thinkingBadge:{ background:P.blueBg, color:P.blue, border:`1px solid ${P.blueBd}`, borderRadius:10, padding:"2px 8px", fontSize:11 },
+  listenSub:    { fontSize:12, color:P.slateL },
+  stopBtn:      { background:P.white, border:`1.5px solid ${P.border}`, borderRadius:8, padding:"8px 16px", color:P.slate, fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:"Inter, system-ui, sans-serif" },
+  feedArea:     { minHeight:200, marginBottom:16 },
+  emptyFeed:    { textAlign:"center", padding:"48px 0", color:P.slateL },
+  transcriptBox:{ background:P.white, border:`1px solid ${P.border}`, borderRadius:8, padding:"12px 14px", marginTop:8 },
+  transcriptLabel:{ fontSize:10, fontWeight:600, color:P.slateL, letterSpacing:1, textTransform:"uppercase", marginBottom:8 },
+  transcriptLine: { display:"flex", gap:10, fontSize:12, marginBottom:4 },
+  transcriptTime: { color:P.slateL, flexShrink:0 },
+  summaryBar:   { display:"flex", alignItems:"flex-start", justifyContent:"space-between", marginBottom:16 },
+  summaryLeft:  {},
+  summaryTitle: { fontSize:18, fontWeight:700, color:P.navy },
+  summarySub:   { fontSize:12, color:P.slateL, marginTop:4 },
+  newSessionBtn:{ background:P.white, border:`1.5px solid ${P.border}`, borderRadius:8, padding:"8px 16px", color:P.slate, fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"Inter, system-ui, sans-serif", flexShrink:0 },
+  statRow:      { display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:8, marginBottom:20 },
+  actionGrid:   { display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:20 },
+  actionCard:   { background:P.white, border:`1.5px solid ${P.border}`, borderRadius:12, padding:"18px 16px", cursor:"pointer", display:"flex", flexDirection:"column", gap:4, textAlign:"left", fontFamily:"Inter, system-ui, sans-serif", transition:"all .15s" },
+  actionIcon:   { fontSize:22, marginBottom:2 },
+  actionTitle:  { fontSize:13, fontWeight:600, color:P.navy },
+  actionDesc:   { fontSize:11, color:P.slateL, lineHeight:1.5, flex:1 },
+  actionCta:    { fontSize:12, fontWeight:600, color:P.blue, marginTop:4 },
+  actionLoading:{ fontSize:12, color:P.slateL, marginTop:4 },
+  tabBar:       { display:"flex", borderBottom:`1px solid ${P.border}`, marginBottom:16, gap:0 },
+  tab:          { padding:"10px 14px", border:"none", background:"none", color:P.slateL, fontSize:12, fontWeight:500, cursor:"pointer", borderBottom:"2px solid transparent", fontFamily:"Inter, system-ui, sans-serif", transition:"all .15s" },
+  tabActive:    { color:P.blue, borderBottomColor:P.blue },
+  emptyTab:     { textAlign:"center", padding:"40px 20px", color:P.slateL, fontSize:13, lineHeight:1.7 },
+  lawyerHeader: { marginBottom:16, padding:"12px 0" },
+  lawyerDisclaim:{ fontSize:11, color:P.slateL, textAlign:"center", marginTop:12, lineHeight:1.6 },
+  analyzingBox: { display:"flex", gap:14, alignItems:"flex-start", background:P.blueBg, border:`1px solid ${P.blueBd}`, borderRadius:10, padding:"16px", marginBottom:16 },
+  analyzingSpinner:{ width:22, height:22, border:`3px solid ${P.blueBd}`, borderTopColor:P.blue, borderRadius:"50%", flexShrink:0 },
+  uploadVideoBtn:{ display:"inline-block", background:P.blue, color:P.white, border:"none", borderRadius:8, padding:"11px 20px", fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:"Inter, system-ui, sans-serif" },
+  disclaimer:   { textAlign:"center", marginTop:32, fontSize:11, color:P.slateL, lineHeight:1.7 },
+  errBanner:    { background:P.amberBg, border:`1px solid ${P.amberBd}`, borderRadius:8, padding:"10px 14px", fontSize:12, color:P.amber, marginBottom:12 },
+  legalNote:    { textAlign:"center", fontSize:11, color:P.slateL, lineHeight:1.6, marginTop:8 },
 };
 
-const GCSS = `
-@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&display=swap');
-*{box-sizing:border-box;margin:0;padding:0;}
-body{background:#08090d;}
-::-webkit-scrollbar{width:4px;}::-webkit-scrollbar-track{background:#0b0d14;}::-webkit-scrollbar-thumb{background:#2a2d45;border-radius:2px;}
-.fi{animation:fi .25s ease;}
-@keyframes fi{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:translateY(0);}}
-.sc{animation:sc .3s ease;}
-@keyframes sc{from{opacity:0;transform:translateX(-8px);}to{opacity:1;transform:translateX(0);}}
-.pdot{width:9px;height:9px;border-radius:50%;background:#ff2d2d;display:inline-block;
-  animation:pd 1.6s ease-in-out infinite;}
-@keyframes pd{0%,100%{opacity:.5;transform:scale(.9);box-shadow:0 0 0 0 rgba(255,45,45,.4);}
-  50%{opacity:1;transform:scale(1.1);box-shadow:0 0 0 6px rgba(255,45,45,0);}}
-.cb:hover,.sb:hover{filter:brightness(1.15);}
-.pb:not(:disabled):hover{filter:brightness(1.1);transform:translateY(-1px);}
-.lbtn:hover{border-color:#4f6ef7 !important;color:#a5b4fc !important;}
-.lc:hover{border-color:#2a2d45 !important;transform:translateY(-1px);box-shadow:0 4px 20px rgba(0,0,0,0.3);}
+const s2 = {
+  sugCard:      { background:P.white, border:`1px solid`, borderRadius:10, padding:"14px 16px", marginBottom:10 },
+  sugTop:       { display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:8 },
+  sugBadge:     { borderRadius:20, padding:"3px 10px", fontSize:11, fontWeight:600 },
+  sugTime:      { fontSize:11, color:P.slateL },
+  sugText:      { fontSize:14, fontWeight:500, color:P.navy, lineHeight:1.5, marginBottom:6 },
+  sugLaw:       { fontSize:11, color:P.slateL },
+  sugTrigger:   { fontSize:11, color:P.slateL, marginTop:4, fontStyle:"italic" },
+  card:         { background:P.white, border:`1px solid`, borderRadius:10, padding:"18px 18px", marginBottom:12 },
+  cardHeader:   { marginBottom:12 },
+  cardTitleRow: { display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" },
+  cardTitle:    { fontSize:14, fontWeight:600, color:P.navy },
+  badge:        { borderRadius:20, padding:"3px 9px", fontSize:11, fontWeight:500, display:"inline-flex", alignItems:"center", gap:4 },
+  cardSummary:  { fontSize:13, color:P.slate, lineHeight:1.6, marginBottom:12, margin:"0 0 12px" },
+  warrantAlert: { background:P.redBg, border:`1px solid ${P.redBd}`, borderRadius:6, padding:"8px 12px", fontSize:12, fontWeight:600, color:P.red, marginBottom:10 },
+  section:      { marginBottom:12 },
+  sectionLabel: { fontSize:10, fontWeight:600, color:P.slateL, letterSpacing:1, textTransform:"uppercase", marginBottom:6 },
+  bullet:       { fontSize:12, color:P.slate, marginBottom:4, lineHeight:1.5 },
+  nextStep:     { background:P.blueBg, border:`1px solid ${P.blueBd}`, borderRadius:6, padding:"9px 12px", fontSize:12, color:P.blue },
+  pointsPanel:  { background:P.bg, border:`1px solid ${P.border}`, borderRadius:8, padding:"14px", marginTop:14 },
+  pointsHeader: { fontSize:12, fontWeight:600, color:P.navy, marginBottom:12 },
+  pointsStats:  { display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8, marginBottom:14 },
+  pointsStat:   { textAlign:"center", background:P.white, border:`1px solid ${P.border}`, borderRadius:8, padding:"10px 6px" },
+  pointsBig:    { fontSize:26, fontWeight:700, color:P.navy, lineHeight:1 },
+  pointsStatLabel:{ fontSize:9, color:P.slateL, marginTop:3 },
+  violationRow: { display:"flex", alignItems:"flex-start", justifyContent:"space-between", padding:"8px 8px", borderRadius:4, marginBottom:2 },
+  violationTotal:{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 8px", borderTop:`1px solid ${P.border}`, marginTop:4 },
+  contestBox:   { background:P.blueBg, border:`1px solid ${P.blueBd}`, borderRadius:6, padding:"10px 12px", fontSize:12, color:P.blue, lineHeight:1.6 },
+  timelineRow:  { display:"flex", alignItems:"flex-start", gap:8, marginBottom:8 },
+  timelineTs:   { fontSize:11, color:P.slateL, flexShrink:0, width:48 },
+  timelineDot:  { width:8, height:8, borderRadius:"50%", flexShrink:0, marginTop:3 },
+  statChip:     { background:P.white, border:`1.5px solid`, borderRadius:8, padding:"12px 8px", textAlign:"center" },
+  lawyerCard:   { background:P.white, border:`1px solid ${P.border}`, borderRadius:12, padding:"18px 18px", marginBottom:12, transition:"all .15s" },
+  lawyerTop:    { display:"flex", alignItems:"flex-start", justifyContent:"space-between", marginBottom:10 },
+  lawyerName:   { fontSize:14, fontWeight:700, color:P.navy, marginBottom:2, display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" },
+  freeTag:      { background:P.greenBg, color:P.green, border:`1px solid ${P.greenBd}`, borderRadius:20, padding:"1px 7px", fontSize:10, fontWeight:500 },
+  lawyerFirm:   { fontSize:12, color:P.slateL, marginBottom:2 },
+  lawyerSpec:   { fontSize:11, color:P.blue, fontWeight:500 },
+  lawyerRating: { textAlign:"center", marginLeft:14, flexShrink:0 },
+  ratingNum:    { fontSize:20, fontWeight:700, color:P.amber, lineHeight:1 },
+  ratingStars:  { fontSize:11, color:P.amber },
+  ratingReviews:{ fontSize:9, color:P.slateL, marginTop:2 },
+  lawyerMeta:   { display:"flex", gap:14, fontSize:11, color:P.slateL, marginBottom:10, flexWrap:"wrap" },
+  lawyerBadge:  { background:P.bg, border:`1px solid ${P.border}`, borderRadius:6, padding:"5px 10px", fontSize:11, color:P.slate, marginBottom:12, display:"inline-block" },
+  contactBtn:   { width:"100%", padding:"11px", background:P.blue, border:"none", borderRadius:8, color:P.white, fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:"Inter, system-ui, sans-serif" },
+  errBanner:    { background:P.amberBg, border:`1px solid ${P.amberBd}`, borderRadius:8, padding:"10px 14px", fontSize:12, color:P.amber, marginBottom:12 },
+};
+
+const CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: ${P.bg}; }
+.fade { animation: fadeIn .2s ease; }
+@keyframes fadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
+.pulse { animation: pulse 2s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity:.6; transform:scale(.9); } 50% { opacity:1; transform:scale(1.1); } }
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
+.sitCard:hover { border-color:${P.blue} !important; background:${P.blueBg} !important; }
+.stateBtn:hover { border-color:${P.blue} !important; }
+.actionCard:hover { border-color:${P.blue} !important; box-shadow:0 2px 8px rgba(29,78,216,.08); }
+.primaryBtn:hover:not(:disabled) { background:${P.blueL} !important; }
+.contactBtn:hover { background:${P.blueL} !important; }
+.lawyerCard:hover { box-shadow:0 2px 12px rgba(0,0,0,.06); }
+textarea:focus { border-color:${P.blue} !important; box-shadow:0 0 0 3px ${P.blueBg}; }
+::-webkit-scrollbar { width:4px; }
+::-webkit-scrollbar-track { background:${P.bg}; }
+::-webkit-scrollbar-thumb { background:${P.slateXL}; border-radius:2px; }
 `;
