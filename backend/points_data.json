@@ -1,0 +1,149 @@
+{
+  "NY": {
+    "meta": {
+      "name": "New York",
+      "license_suspension_threshold": 11,
+      "surcharge_threshold": 6,
+      "surcharge_amount": "$100/year for 3 years (6-8 pts), $150/year (9-11 pts)",
+      "points_duration_years": 18,
+      "notes": "Points accumulate over 18 months. 11+ points in 18 months = automatic suspension. Driver Responsibility Assessment (DRA) fee applies at 6+ points."
+    },
+    "violations": {
+      "1180a":  {"name": "Speeding 1-10 mph over limit",           "points": 3,  "fine_range": "$90-$150",   "category": "speeding"},
+      "1180b":  {"name": "Speeding 11-20 mph over limit",          "points": 4,  "fine_range": "$90-$300",   "category": "speeding"},
+      "1180c":  {"name": "Speeding in school zone",                "points": 3,  "fine_range": "$90-$150",   "category": "speeding"},
+      "1180d":  {"name": "Speeding 21-30 mph over limit",          "points": 6,  "fine_range": "$180-$600",  "category": "speeding"},
+      "1180e":  {"name": "Speeding 31-40 mph over limit",          "points": 8,  "fine_range": "$180-$600",  "category": "speeding"},
+      "1180f":  {"name": "Speeding more than 40 mph over limit",   "points": 11, "fine_range": "$180-$600",  "category": "speeding"},
+      "1111d1": {"name": "Ran red light",                          "points": 3,  "fine_range": "$138-$238",  "category": "signal"},
+      "1111d2": {"name": "Disobeyed traffic signal",               "points": 3,  "fine_range": "$138-$238",  "category": "signal"},
+      "1172a":  {"name": "Failed to stop at stop sign",            "points": 3,  "fine_range": "$138-$238",  "category": "signal"},
+      "1128a":  {"name": "Unsafe lane change",                     "points": 3,  "fine_range": "$150-$300",  "category": "lane"},
+      "1128b":  {"name": "Improper lane use",                      "points": 2,  "fine_range": "$88-$188",   "category": "lane"},
+      "1129a":  {"name": "Following too closely (tailgating)",     "points": 4,  "fine_range": "$88-$288",   "category": "following"},
+      "1163a":  {"name": "Improper turn",                          "points": 2,  "fine_range": "$88-$188",   "category": "turn"},
+      "1225c":  {"name": "Using handheld mobile device (texting)", "points": 5,  "fine_range": "$50-$200",   "category": "distracted"},
+      "1225d":  {"name": "Using handheld mobile device (calling)", "points": 5,  "fine_range": "$50-$200",   "category": "distracted"},
+      "1146":   {"name": "Failure to yield to pedestrian",         "points": 3,  "fine_range": "$150-$300",  "category": "yielding"},
+      "1140":   {"name": "Failure to yield right of way",          "points": 3,  "fine_range": "$88-$288",   "category": "yielding"},
+      "375":    {"name": "Equipment violation",                    "points": 2,  "fine_range": "$88-$150",   "category": "equipment"},
+      "306b":   {"name": "No insurance",                           "points": 0,  "fine_range": "$150-$1500", "category": "insurance", "note": "License revocation + $750 civil penalty"},
+      "509":    {"name": "Unlicensed driver",                      "points": 0,  "fine_range": "$75-$300",   "category": "license"},
+      "511":    {"name": "Aggravated unlicensed operation",        "points": 0,  "fine_range": "$200-$500",  "category": "license"},
+      "1192.1": {"name": "DWAI (alcohol)",                         "points": 0,  "fine_range": "$300-$500",  "category": "dwi", "note": "Criminal — automatic license suspension"},
+      "1192.2": {"name": "DWI per se (BAC 0.08+)",                 "points": 0,  "fine_range": "$500-$1000", "category": "dwi", "note": "Criminal — automatic license revocation"},
+      "1192.3": {"name": "DWI common law",                         "points": 0,  "fine_range": "$500-$1000", "category": "dwi", "note": "Criminal — automatic license revocation"}
+    },
+    "thresholds": [
+      {"points": 6,  "consequence": "Driver Responsibility Assessment fee begins ($100/yr for 3 yrs)",  "urgency": "yellow"},
+      {"points": 9,  "consequence": "DRA fee increases to $150/yr for 3 years",                         "urgency": "yellow"},
+      {"points": 11, "consequence": "AUTOMATIC LICENSE SUSPENSION",                                     "urgency": "red"},
+      {"points": 18, "consequence": "Potential permanent revocation for repeat offenders",               "urgency": "red"}
+    ]
+  },
+
+  "CA": {
+    "meta": {
+      "name": "California",
+      "license_suspension_threshold": 4,
+      "negligent_operator_threshold": 4,
+      "points_duration_years": 1,
+      "notes": "CA uses a 1-year, 18-month, and 2-year rolling window depending on threshold. 4 pts in 12mo, 6 pts in 24mo, or 8 pts in 36mo = negligent operator probation or suspension. Commercial licenses use 0.5x multiplier."
+    },
+    "violations": {
+      "22350":  {"name": "Unsafe speed (basic speed law)",          "points": 1,  "fine_range": "$238-$490",  "category": "speeding"},
+      "22356":  {"name": "Speeding over 100 mph",                   "points": 2,  "fine_range": "$500-$1000", "category": "speeding", "note": "Mandatory court appearance"},
+      "22349a": {"name": "Speeding over 65 mph",                    "points": 1,  "fine_range": "$238-$490",  "category": "speeding"},
+      "22349b": {"name": "Speeding over 55 mph (65 limit zone)",    "points": 1,  "fine_range": "$238-$360",  "category": "speeding"},
+      "21453a": {"name": "Ran red light",                           "points": 1,  "fine_range": "$490-$630",  "category": "signal"},
+      "21453b": {"name": "Turned on red without stopping",          "points": 1,  "fine_range": "$490-$550",  "category": "signal"},
+      "21801a": {"name": "Failure to yield at yield sign",          "points": 1,  "fine_range": "$238-$360",  "category": "yielding"},
+      "22107":  {"name": "Unsafe lane change",                      "points": 1,  "fine_range": "$238-$360",  "category": "lane"},
+      "21703":  {"name": "Following too closely",                   "points": 1,  "fine_range": "$238-$360",  "category": "following"},
+      "23123":  {"name": "Handheld cell phone while driving",       "points": 1,  "fine_range": "$162-$285",  "category": "distracted"},
+      "23123.5":{"name": "Texting while driving",                   "points": 1,  "fine_range": "$162-$285",  "category": "distracted"},
+      "20001":  {"name": "Hit and run with injury",                 "points": 2,  "fine_range": "$1000+",     "category": "serious", "note": "Felony — criminal charges likely"},
+      "20002":  {"name": "Hit and run property damage",             "points": 2,  "fine_range": "$1000+",     "category": "serious"},
+      "23152a": {"name": "DUI alcohol",                             "points": 2,  "fine_range": "$390-$1000", "category": "dwi", "note": "Criminal — license suspension 6mo-3yrs"},
+      "23152b": {"name": "DUI BAC 0.08+",                          "points": 2,  "fine_range": "$390-$1000", "category": "dwi", "note": "Criminal — license suspension"},
+      "14601.1":{"name": "Driving on suspended license",           "points": 2,  "fine_range": "$300-$1000", "category": "license"},
+      "16028":  {"name": "No proof of insurance",                   "points": 0,  "fine_range": "$100-$200",  "category": "insurance", "note": "First offense — no points but fine + possible suspension"}
+    },
+    "thresholds": [
+      {"points": 4,  "consequence": "Negligent Operator — DMV warning letter",                    "urgency": "yellow"},
+      {"points": 6,  "consequence": "Negligent Operator probation (within 24 months)",             "urgency": "yellow"},
+      {"points": 8,  "consequence": "License SUSPENSION (within 36 months)",                      "urgency": "red"},
+      {"points": 12, "consequence": "License REVOCATION — reapplication required",                "urgency": "red"}
+    ]
+  },
+
+  "TX": {
+    "meta": {
+      "name": "Texas",
+      "license_suspension_threshold": 6,
+      "points_duration_years": 3,
+      "surcharge_threshold": 6,
+      "notes": "Texas uses a Driver Responsibility Program (DRP). Points stay on record 3 years. 6+ points = $100 surcharge/yr + $25 per additional point. DWI = automatic $1000-$2000/yr surcharge for 3 years regardless of points."
+    },
+    "violations": {
+      "545.351": {"name": "Speeding (basic speed rule)",             "points": 2,  "fine_range": "$1-$200",    "category": "speeding"},
+      "545.352": {"name": "Speeding in school zone",                "points": 2,  "fine_range": "$1-$200",    "category": "speeding", "note": "Fines doubled in school zones"},
+      "544.010": {"name": "Ran stop sign",                          "points": 2,  "fine_range": "$1-$200",    "category": "signal"},
+      "544.007": {"name": "Ran red light",                          "points": 2,  "fine_range": "$1-$200",    "category": "signal"},
+      "545.060": {"name": "Unsafe lane change",                     "points": 2,  "fine_range": "$1-$200",    "category": "lane"},
+      "545.062": {"name": "Following too closely",                  "points": 2,  "fine_range": "$1-$200",    "category": "following"},
+      "545.104": {"name": "Failure to signal",                      "points": 2,  "fine_range": "$1-$200",    "category": "turn"},
+      "545.401": {"name": "Reckless driving",                       "points": 2,  "fine_range": "$200-$500",  "category": "serious", "note": "Criminal misdemeanor"},
+      "550.021": {"name": "Hit and run with injury",                "points": 0,  "fine_range": "$1000+",     "category": "serious", "note": "Felony — criminal charges"},
+      "545.4251":{"name": "Texting while driving",                  "points": 2,  "fine_range": "$25-$99",    "category": "distracted"},
+      "49.04":   {"name": "DWI",                                    "points": 0,  "fine_range": "$2000+",     "category": "dwi", "note": "Criminal + $1000/yr DRP surcharge for 3 yrs"},
+      "521.457": {"name": "Driving with invalid license",           "points": 2,  "fine_range": "$1-$200",    "category": "license"},
+      "601.191": {"name": "No liability insurance",                 "points": 0,  "fine_range": "$175-$350",  "category": "insurance", "note": "License/registration suspension"}
+    },
+    "thresholds": [
+      {"points": 6,  "consequence": "Driver Responsibility surcharge begins — $100/yr",           "urgency": "yellow"},
+      {"points": 8,  "consequence": "Surcharge increases — $100 + $25 per point over 6",         "urgency": "yellow"},
+      {"points": 12, "consequence": "License SUSPENSION review by DPS",                          "urgency": "red"},
+      {"points": 24, "consequence": "License REVOCATION likely",                                  "urgency": "red"}
+    ]
+  },
+
+  "FL": {
+    "meta": {
+      "name": "Florida",
+      "license_suspension_threshold": 12,
+      "points_duration_years": 1,
+      "notes": "FL points expire after varying periods: most after 3 years, serious violations after 7 years. 12 pts in 12mo = 30-day suspension. 18 pts in 18mo = 3-month suspension. 24 pts in 36mo = 1-year suspension."
+    },
+    "violations": {
+      "316.183": {"name": "Speeding (less than 15 mph over)",        "points": 3,  "fine_range": "$129-$229",  "category": "speeding"},
+      "316.183h": {"name": "Speeding 15+ mph over or school zone",   "points": 4,  "fine_range": "$204-$304",  "category": "speeding"},
+      "316.075": {"name": "Ran red light",                           "points": 3,  "fine_range": "$158-$258",  "category": "signal"},
+      "316.123": {"name": "Ran stop sign",                           "points": 3,  "fine_range": "$158-$258",  "category": "signal"},
+      "316.0895": {"name": "Following too closely",                  "points": 3,  "fine_range": "$129-$229",  "category": "following"},
+      "316.089": {"name": "Improper lane change",                    "points": 3,  "fine_range": "$129-$229",  "category": "lane"},
+      "316.193": {"name": "DUI",                                     "points": 0,  "fine_range": "$500-$1000", "category": "dwi", "note": "Criminal — license revoked 180 days-1 year"},
+      "316.061": {"name": "Hit and run property damage",             "points": 6,  "fine_range": "$500+",      "category": "serious"},
+      "316.027": {"name": "Hit and run with injury",                 "points": 6,  "fine_range": "$1000+",     "category": "serious", "note": "Felony"},
+      "316.305": {"name": "Texting while driving",                   "points": 3,  "fine_range": "$30-$60",    "category": "distracted", "note": "Secondary offense"},
+      "322.03":  {"name": "Driving without valid license",           "points": 0,  "fine_range": "$500+",      "category": "license", "note": "Criminal misdemeanor"},
+      "627.733": {"name": "No insurance (PIP)",                      "points": 0,  "fine_range": "$150-$500",  "category": "insurance", "note": "License suspension"}
+    },
+    "thresholds": [
+      {"points": 12, "consequence": "30-day license SUSPENSION (within 12 months)",              "urgency": "red"},
+      {"points": 18, "consequence": "3-month license SUSPENSION (within 18 months)",             "urgency": "red"},
+      {"points": 24, "consequence": "1-YEAR license SUSPENSION (within 36 months)",              "urgency": "red"},
+      {"points": 30, "consequence": "5-YEAR license REVOCATION possible",                        "urgency": "red"}
+    ]
+  },
+
+  "federal": {
+    "meta": {
+      "name": "Federal / Unknown State",
+      "notes": "Points systems vary by state. Federal violations (on federal land, national parks) are handled case-by-case. Always check your specific state DMV.",
+      "license_suspension_threshold": null
+    },
+    "violations": {},
+    "thresholds": []
+  }
+}
