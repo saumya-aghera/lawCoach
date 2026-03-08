@@ -89,10 +89,10 @@ steps:
     args:
       - -c
       - |
-        BACKEND_URL=$(cat /workspace/backend_url.txt)
-        echo "Building frontend with VITE_API_URL=${BACKEND_URL}"
+        BACKEND_URL=$$(cat /workspace/backend_url.txt)
+        echo "Building frontend with VITE_API_URL=$$BACKEND_URL"
         docker build \
-          --build-arg VITE_API_URL=${BACKEND_URL} \
+          --build-arg VITE_API_URL=$$BACKEND_URL \
           -t ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_FRONTEND_SERVICE}:${BUILD_ID} \
           -t ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_FRONTEND_SERVICE}:latest \
           ./frontend
@@ -139,14 +139,14 @@ steps:
     args:
       - -c
       - |
-        BACKEND_URL=$(cat /workspace/backend_url.txt)
-        FRONTEND_URL=$(gcloud run services describe ${_FRONTEND_SERVICE} \
+        BACKEND_URL=$$(cat /workspace/backend_url.txt)
+        FRONTEND_URL=$$(gcloud run services describe ${_FRONTEND_SERVICE} \
           --region ${_REGION} --format 'value(status.url)')
         echo "=================================================="
         echo "  LAWAIER DEPLOYED"
         echo "=================================================="
-        echo "  Backend:  ${BACKEND_URL}"
-        echo "  Frontend: ${FRONTEND_URL}"
+        echo "  Backend:  $$BACKEND_URL"
+        echo "  Frontend: $$FRONTEND_URL"
         echo "=================================================="
     id: final-output
     waitFor: [deploy-frontend]
