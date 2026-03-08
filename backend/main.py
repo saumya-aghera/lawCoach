@@ -112,6 +112,15 @@ class TranslateRequest(BaseModel):
     text: str
     target_lang: str  # e.g. "Spanish", "French"
 
+class TranscribeAnalyzeRequest(BaseModel):
+    audio_base64: str          # raw audio chunk as base64
+    media_type:   str          # "audio/webm", "audio/ogg", etc.
+    situation:    str
+    state:        str
+    description:  str
+    conversation_history: list[dict] = []
+    user_lang:    str = "en"   # BCP-47 lang code prefix e.g. "hi", "es"
+
 
 # ── Law search (keyword-based, no local ML models needed) ─────────────────
 def query_laws(query: str, state: str, situation: str, n: int = 5) -> list[dict]:
@@ -332,6 +341,58 @@ async def translate_text(req: TranslateRequest):
     msgs = [{"role": "user", "content": req.text}]
     result = await call_ai(system, msgs, max_tokens=400)
     return {"translated": result.strip()}
+
+
+@app.post("/transcribe-analyze")
+async def transcribe_analyze(req: TranscribeAnalyzeRequest):
+    """
+    Gemini listens to an audio chunk and in ONE call:
+      1. Transcribes what was said
+      2. Detects speaker (officer vs user) from tone + content + language
+      3. Translates if multilingual session
+      4. Gives legal coaching hint
+    Replaces Web Speech API — works in any browser, handles multilingual natively.
+    """
+    laws = query_laws("", req.state, req.situation, n=5)
+    law_block = "\n\n".join([
+        f"[LAW {i+1}] {l['title']}\nRef: {l['law_reference']}\n"
+        f"Urgency: {l['urgency'].upper()}\nAdvise: {l['actionable_response']}"
+        for i, l in enumerate(laws)
+    ])
+
+    multilingual = req.user_lang and req.user_lang != "en"
+    lang_note = ""
+    if multilingual:
+        lang_note = f"""
+MULTILINGUAL: The detained person speaks {req.user_lang}.
+- Officer speaks ENGLISH → set speaker="officer". Also put the officer's words translated to {req.user_lang} in "translated_for_user".
+- Detained person speaks {req.user_lang} → set speaker="you". Put their words translated to English in "english_text".
+"""
+
+    system = f"""You are a real-time AI legal rights coach monitoring a live {req.situation.replace('_',' ')} encounter in {req.state}.
+
+Listen to the audio chunk carefully.
+{lang_note}
+LAWS TO REFERENCE:
+{law_block}
+
+Rules:
+- "officer" = commanding, authoritative, requests for ID/documents, stating charges, asking to step out
+- "you" = detained person responding, asking about rights, quieter/more hesitant
+- If the audio is silent, unclear, or background noise only → return transcribed="" and speaker=""
+- Coaching suggestion must be actionable, max 1 sentence
+
+Output ONLY valid JSON, no markdown:
+{{"transcribed":"what was said verbatim","speaker":"officer|you|","english_text":"","translated_for_user":"","urgency":"red|yellow|green","suggestion":"","law":""}}"""
+
+    msgs = [{"role": "user", "content": "Transcribe and analyze this audio."}]
+    raw = await call_ai(system, msgs, max_tokens=400,
+                        image_base64=req.audio_base64, media_type=req.media_type)
+    result = _parse_json(raw, {
+        "transcribed": "", "speaker": "", "english_text": "",
+        "translated_for_user": "", "urgency": "green", "suggestion": "", "law": "",
+    })
+    return result
 
 
 @app.post("/analyze")

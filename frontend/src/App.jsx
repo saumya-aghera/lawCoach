@@ -203,78 +203,79 @@ const apiGenerateReport  = (body) =>
 const apiTranslate = (text, target_lang) => post("/translate", { text, target_lang });
 const apiAnalyze   = (spoken_text, situation, state, description, conversation_history, user_lang = "en") =>
   post("/analyze", { spoken_text, situation, state, description, conversation_history, user_lang });
+const apiTranscribeAnalyze = (audio_base64, media_type, situation, state, description, conversation_history, user_lang = "en") =>
+  post("/transcribe-analyze", { audio_base64, media_type, situation, state, description, conversation_history, user_lang });
 
-// ─── Audio recorder hook ───────────────────────────────────────────────────
-function useRecorder() {
-  const [audioUrl, setAudioUrl] = useState(null);
-  const chunks = useRef([]);
-  const recRef = useRef(null);
+
+// ─── Audio capture hook (Gemini-based, replaces Web Speech API) ────────────
+// Records mic in 4-second chunks → sends to /transcribe-analyze → Gemini does
+// transcription + speaker detection + translation + legal hints in one call.
+// Also accumulates all audio for post-session download.
+function useAudioCapture(onChunk) {
+  const mrRef       = useRef(null);
+  const streamRef   = useRef(null);
+  const activeRef   = useRef(false);
+  const allChunks   = useRef([]);        // accumulate for download
+  const onChunkRef  = useRef(onChunk);
+  const [capturing, setCapturing] = useState(false);
+  const [supported, setSupported] = useState(true);
+  const [audioUrl,  setAudioUrl]  = useState(null);
+
+  useEffect(() => { onChunkRef.current = onChunk; }, [onChunk]);
 
   const start = useCallback(async () => {
+    setAudioUrl(null);
+    allChunks.current = [];
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mr = new MediaRecorder(stream);
-      chunks.current = [];
-      mr.ondataavailable = e => { if (e.data.size > 0) chunks.current.push(e.data); };
-      mr.onstop = () => {
-        const blob = new Blob(chunks.current, { type: "audio/webm" });
-        setAudioUrl(URL.createObjectURL(blob));
-        stream.getTracks().forEach(t => t.stop());
+      streamRef.current = stream;
+
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : "audio/ogg";
+      const baseType = mimeType.split(";")[0];
+
+      const mr = new MediaRecorder(stream, { mimeType });
+      activeRef.current = true;
+
+      mr.ondataavailable = (e) => {
+        if (e.data.size < 200) return;           // skip empty frames
+        allChunks.current.push(e.data);          // save for download
+        if (!activeRef.current) return;
+        const blob = new Blob([e.data], { type: baseType });
+        const reader = new FileReader();
+        reader.onload = () => {
+          const base64 = reader.result.split(",")[1];
+          onChunkRef.current(base64, baseType);
+        };
+        reader.readAsDataURL(blob);
       };
-      mr.start(1000); // collect chunks every 1s
-      recRef.current = mr;
-    } catch { /* mic permission denied or unavailable */ }
+
+      mr.onstop = () => {
+        if (allChunks.current.length > 0) {
+          const full = new Blob(allChunks.current, { type: baseType });
+          setAudioUrl(URL.createObjectURL(full));
+        }
+        streamRef.current?.getTracks().forEach(t => t.stop());
+        setCapturing(false);
+      };
+
+      mr.start(4000);
+      mrRef.current = mr;
+      setCapturing(true);
+    } catch {
+      setSupported(false);
+    }
   }, []);
 
   const stop = useCallback(() => {
-    if (recRef.current && recRef.current.state !== "inactive") recRef.current.stop();
-    recRef.current = null;
+    activeRef.current = false;
+    try { mrRef.current?.stop(); } catch {}
   }, []);
 
-  const reset = useCallback(() => { setAudioUrl(null); chunks.current = []; }, []);
+  const reset = useCallback(() => { setAudioUrl(null); allChunks.current = []; }, []);
 
-  return { audioUrl, start, stop, reset };
-}
-
-// ─── Speech hook ───────────────────────────────────────────────────────────
-function useSpeech(onResult, lang = "en-US") {
-  const ref        = useRef(null);
-  const onResultRef = useRef(onResult);
-  const activeRef  = useRef(false);          // track whether we WANT it running
-  const [listening, setListening] = useState(false);
-  const [supported, setSupported] = useState(true);
-
-  // Keep callback ref fresh without ever rebuilding the recognizer
-  useEffect(() => { onResultRef.current = onResult; }, [onResult]);
-
-  // Only rebuild recognizer when the language changes (not on every handleSpeech recreate)
-  useEffect(() => {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) { setSupported(false); return; }
-    const r = new SR();
-    r.continuous     = true;
-    r.interimResults = false;
-    r.lang           = lang;
-    r.onresult = e => {
-      const t = e.results[e.results.length - 1][0].transcript.trim();
-      if (t) onResultRef.current(t);
-    };
-    r.onerror = () => {};
-    // Auto-restart: Chrome stops the recognizer after silences even with continuous=true
-    r.onend = () => {
-      if (activeRef.current) {
-        try { r.start(); } catch { /* already started */ }
-      } else {
-        setListening(false);
-      }
-    };
-    ref.current = r;
-    return () => { activeRef.current = false; try { r.stop(); } catch {} };
-  }, [lang]);                                // ← only lang, NOT onResult
-
-  const start = useCallback(() => { activeRef.current = true;  ref.current?.start(); setListening(true);  }, []);
-  const stop  = useCallback(() => { activeRef.current = false; ref.current?.stop();  setListening(false); }, []);
-  return { listening, supported, start, stop };
+  return { capturing, supported, audioUrl, start, stop, reset };
 }
 
 // ─── Session management ────────────────────────────────────────────────────
@@ -328,8 +329,6 @@ export default function App() {
   // Results tab: "suggestions" | "transcript" | "document" | "video" | "lawyers"
   const [activeTab, setActiveTab] = useState("suggestions");
 
-  const { audioUrl, start: startRecording, stop: stopRecording, reset: resetRecording } = useRecorder();
-
   const [userLang,       setUserLang]       = useState("en-US");
   const [translating,    setTranslating]    = useState(false);
   const [sessions,       setSessions]       = useState(loadSessions);
@@ -347,81 +346,62 @@ export default function App() {
     fetch(`${API_BASE}/health`).then(r => setBackendOk(r.ok)).catch(() => setBackendOk(false));
   }, []);
 
-  // ── Speech — fully automatic, no user input required ─────────────────────
-  // Uses refs for history/isThinking so this callback stays stable and never
-  // triggers useSpeech to rebuild the recognizer mid-session.
-  const handleSpeech = useCallback(async (text) => {
+  // ── Audio chunk handler — Gemini does transcription + analysis in one call ─
+  const handleChunk = useCallback(async (audio_base64, media_type) => {
     if (isThinkingRef.current) return;
     const ts           = new Date().toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
-    const langInfo     = LANGUAGES.find(l => l.code === userLang) || LANGUAGES[0];
     const multilingual = userLang !== "en-US";
-    const userLangCode = userLang.split("-")[0]; // "hi-IN" → "hi"
+    const userLangCode = userLang.split("-")[0];
 
     setIsThinking(true);
-    setTranslating(multilingual);
     setError(null);
 
     try {
-      // Single Gemini call: detects language, classifies speaker, translates user speech,
-      // and gives legal coaching — all in one round-trip
-      const res = await apiAnalyze(
-        text, situation, stateCode, description,
-        historyRef.current,                          // ← read from ref, not closure
+      const res = await apiTranscribeAnalyze(
+        audio_base64, media_type,
+        situation, stateCode, description,
+        historyRef.current,
         multilingual ? userLangCode : "en",
       );
-      const speaker     = res.speaker || "officer";
-      const englishText = res.english_text || "";
 
-      let displayText  = text;
-      let originalText = null;
+      // Skip empty / silent chunks
+      if (!res.transcribed || !res.speaker) { setIsThinking(false); return; }
 
-      if (multilingual && speaker === "officer") {
-        // Officer spoke English → translate to user's language for display + TTS
-        setTranslating(true);
-        try {
-          const tr = await apiTranslate(text, langInfo.gemini);
-          if (tr.translated) {
-            displayText  = tr.translated;
-            originalText = text;
-            if (window.speechSynthesis) {
-              const utt = new SpeechSynthesisUtterance(tr.translated);
-              utt.lang = userLang; utt.rate = 0.9;
-              window.speechSynthesis.speak(utt);
-            }
-          }
-        } catch { /* use original on failure */ }
-        setTranslating(false);
-      } else if (multilingual && speaker === "you" && englishText) {
-        originalText = englishText; // show English translation as subtext
+      const speaker          = res.speaker;
+      const displayText      = multilingual && speaker === "officer" && res.translated_for_user
+        ? res.translated_for_user   // officer's words in user's language
+        : res.transcribed;          // verbatim
+      const originalText     = multilingual && speaker === "officer" && res.translated_for_user
+        ? res.transcribed           // English original shown as subtext
+        : (multilingual && speaker === "you" && res.english_text ? res.english_text : null);
+
+      // Speak officer's translated words aloud in user's language
+      if (multilingual && speaker === "officer" && res.translated_for_user && window.speechSynthesis) {
+        const utt = new SpeechSynthesisUtterance(res.translated_for_user);
+        utt.lang = userLang; utt.rate = 0.9;
+        window.speechSynthesis.speak(utt);
       }
 
       setTranscript(p => [...p, { text: displayText, originalText, ts, speaker, id: Date.now() + Math.random() }]);
 
-      // Append to history using English text so legal analysis stays accurate
-      const historyText = (multilingual && speaker === "you" && englishText) ? englishText : text;
+      // History always uses English for accurate legal analysis
+      const historyText = (multilingual && speaker === "you" && res.english_text)
+        ? res.english_text : res.transcribed;
       setHistory(p => {
         const h2 = [...p, { role:"user", content:`Spoken: "${historyText}"` }];
-        if (res.suggestion) {
-          return [...h2, { role:"assistant", content:JSON.stringify(res) }];
-        }
-        return h2;
+        return res.suggestion ? [...h2, { role:"assistant", content:JSON.stringify(res) }] : h2;
       });
 
       if (res.suggestion) {
         setSuggestions(p => [...p, { ...res, id:Date.now(), time:ts, trigger:displayText }]);
       }
     } catch {
-      setTranscript(p => [...p, { text, ts, speaker:"officer", id: Date.now() + Math.random() }]);
       setError("Analysis failed — check backend is running.");
     }
     setIsThinking(false);
-    setTranslating(false);
   }, [situation, stateCode, description, userLang]);
-  // ↑ history and isThinking intentionally omitted — accessed via refs above
 
-  // Run recognizer in user's language — Chrome handles bilingual sessions natively
-  // Gemini detects which language was spoken and classifies speaker accordingly
-  const { listening, supported, start: startSpeech, stop: stopSpeech } = useSpeech(handleSpeech, userLang);
+  const { capturing, supported, audioUrl, start: startCapture, stop: stopCapture, reset: resetAudio } = useAudioCapture(handleChunk);
 
   const flipSpeaker = useCallback((id) => {
     setTranscript(p => p.map(t =>
@@ -448,7 +428,7 @@ export default function App() {
     setSuggestions([]);
     setHistory([]);
     setDocFindings([]); setScanResult(null); setVideoResult(null);
-    resetRecording();
+    resetAudio();
     setTranscript([{ text: announcement, ts, speaker: "system" }]);
     setStartTime(Date.now());
 
@@ -459,14 +439,12 @@ export default function App() {
       window.speechSynthesis.speak(utt);
     }
 
-    startRecording();
-    startSpeech();
+    startCapture();    // starts MediaRecorder + Gemini analysis loop
     setScreen("s3_listening");
   }
 
   function stopListening() {
-    stopSpeech();
-    stopRecording();
+    stopCapture();
     // Save session to localStorage
     const session = {
       id: Date.now(),
@@ -492,7 +470,7 @@ export default function App() {
     setSuggestions([]); setTranscript([]); setHistory([]);
     setDocFindings([]); setScanResult(null);
     setVideoResult(null); setVideoName("");
-    resetRecording();
+    resetAudio();
     setError(null); setReportReady(false); setShowLawyers(false);
     setScreen("s1_situation");
   }
@@ -859,7 +837,7 @@ Thank you,
 
             {!supported && (
               <div style={{...s.errBanner, marginTop:12}}>
-                Speech recognition requires Chrome or Edge. Use a supported browser for live audio.
+                Microphone access is required. Please allow microphone permission and refresh the page.
               </div>
             )}
           </div>
