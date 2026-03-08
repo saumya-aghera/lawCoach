@@ -90,6 +90,7 @@ class AnalyzeRequest(BaseModel):
     state: str
     description: str
     conversation_history: list[dict] = []
+    user_lang: str = "en"          # e.g. "hi", "es", "fr" — "en" means English only session
 
 class DocumentAnalysisRequest(BaseModel):
     image_base64: str
@@ -127,24 +128,39 @@ def query_laws(query: str, state: str, situation: str, n: int = 5) -> list[dict]
     scored.sort(key=lambda x: x["relevance_score"], reverse=True)
     return scored[:n]
 
-def build_system_prompt(laws, situation, state, description):
+def build_system_prompt(laws, situation, state, description, user_lang: str = "en"):
     law_block = "\n\n".join([
         f"[LAW {i+1}] {l['title']}\nRef: {l['law_reference']}\n"
         f"Urgency: {l['urgency'].upper()}\nAdvise: {l['actionable_response']}"
         for i, l in enumerate(laws)
     ])
+
+    lang_rules = ""
+    if user_lang and user_lang != "en":
+        lang_rules = f"""
+MULTILINGUAL SESSION: The detained person speaks {user_lang}. Two speakers will be heard:
+- OFFICER: speaks English (commands, asks for ID, states charges, "step out", "do you know why I stopped you", etc.)
+- USER (detained person): speaks {user_lang}
+
+Detection rules:
+1. If the text is in English → speaker is "officer"
+2. If the text is in {user_lang} → speaker is "you"
+3. If mixed / unclear → use content to decide (authority/commands = officer, rights/responses = you)
+
+Also provide "english_text": if the user spoke in {user_lang}, translate their words to English here.
+If the officer spoke in English, set "english_text" to "".
+"""
+
     return f"""You are a real-time AI legal rights coach.
 SITUATION: {situation.replace('_',' ').title()} | STATE: {state}
 CONTEXT: {description}
 
 LAWS:
 {law_block}
-
-Also classify who spoke: "officer" if this sounds like law enforcement (commands, requests for ID, stating charges, asking you to step out, etc.), "you" if it sounds like the detained person (responses, questions about rights, protests).
-
+{lang_rules}
 Output ONLY valid JSON — no markdown, no extra text:
-{{"urgency":"red|yellow|green","suggestion":"1 sentence max","law":"law name","speaker":"officer|you"}}
-Nothing significant → {{"urgency":"green","suggestion":"","law":"","speaker":"officer"}}"""
+{{"urgency":"red|yellow|green","suggestion":"1 sentence max","law":"law name","speaker":"officer|you","english_text":""}}
+Nothing significant → {{"urgency":"green","suggestion":"","law":"","speaker":"officer","english_text":""}}"""
 
 
 # ── Unified AI caller (Gemini / Vertex AI) ────────────────────────────────
@@ -320,14 +336,21 @@ async def translate_text(req: TranslateRequest):
 
 @app.post("/analyze")
 async def analyze(req: AnalyzeRequest):
-    laws    = query_laws(req.spoken_text, req.state, req.situation)
-    system  = build_system_prompt(laws, req.situation, req.state, req.description)
-    msgs    = req.conversation_history + [{"role":"user","content": f'They said: "{req.spoken_text}". JSON only.'}]
-    raw     = await call_ai(system, msgs, max_tokens=200)
-    result  = _parse_json(raw, {"urgency":"green","suggestion":"","law":"","speaker":"officer"})
-    return {"urgency": result.get("urgency","green"), "suggestion": result.get("suggestion",""),
-            "law": result.get("law",""), "speaker": result.get("speaker","officer"),
-            "laws_used": [l["title"] for l in laws[:2]]}
+    # Use english_text for law search if user spoke in another language
+    search_text = req.spoken_text
+    laws   = query_laws(search_text, req.state, req.situation)
+    system = build_system_prompt(laws, req.situation, req.state, req.description, req.user_lang)
+    msgs   = req.conversation_history + [{"role":"user","content": f'Spoken: "{req.spoken_text}". JSON only.'}]
+    raw    = await call_ai(system, msgs, max_tokens=300)
+    result = _parse_json(raw, {"urgency":"green","suggestion":"","law":"","speaker":"officer","english_text":""})
+    return {
+        "urgency":      result.get("urgency", "green"),
+        "suggestion":   result.get("suggestion", ""),
+        "law":          result.get("law", ""),
+        "speaker":      result.get("speaker", "officer"),
+        "english_text": result.get("english_text", ""),
+        "laws_used":    [l["title"] for l in laws[:2]],
+    }
 
 
 # ── Vision Document Analysis + Points Calculator ─────────────────────────

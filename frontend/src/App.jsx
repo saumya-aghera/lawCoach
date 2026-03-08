@@ -193,8 +193,6 @@ const post = (url, body) =>
     .then(r => { if(!r.ok) throw new Error(`${r.status}`); return r.json(); });
 
 const apiPrepare         = (situation, state, description) => post("/prepare", { situation, state, description });
-const apiAnalyze         = (spoken_text, situation, state, description, conversation_history) =>
-  post("/analyze", { spoken_text, situation, state, description, conversation_history });
 const apiAnalyzeDocument = (image_base64, media_type, state, situation, description) =>
   post("/analyze-document", { image_base64, media_type, state, situation, description });
 const apiAnalyzeVideo    = (video_base64, media_type, state, situation, description) =>
@@ -203,6 +201,8 @@ const apiGenerateReport  = (body) =>
   fetch(`${API_BASE}/generate-report`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) })
     .then(r => { if(!r.ok) throw new Error(`${r.status}`); return r.blob(); });
 const apiTranslate = (text, target_lang) => post("/translate", { text, target_lang });
+const apiAnalyze   = (spoken_text, situation, state, description, conversation_history, user_lang = "en") =>
+  post("/analyze", { spoken_text, situation, state, description, conversation_history, user_lang });
 
 // ─── Audio recorder hook ───────────────────────────────────────────────────
 function useRecorder() {
@@ -310,7 +310,6 @@ export default function App() {
   const { audioUrl, start: startRecording, stop: stopRecording, reset: resetRecording } = useRecorder();
 
   const [userLang,       setUserLang]       = useState("en-US");
-  const [userSpeaking,   setUserSpeaking]   = useState(false);
   const [translating,    setTranslating]    = useState(false);
   const [sessions,       setSessions]       = useState(loadSessions);
   const [showSessions,   setShowSessions]   = useState(false);
@@ -321,91 +320,73 @@ export default function App() {
     fetch(`${API_BASE}/health`).then(r => setBackendOk(r.ok)).catch(() => setBackendOk(false));
   }, []);
 
-  // ── Speech ──────────────────────────────────────────────────────────────
-  const handleSpeech = useCallback(async (text, forceSpeaker = null) => {
-    const ts = new Date().toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+  // ── Speech — fully automatic, no user input required ─────────────────────
+  const handleSpeech = useCallback(async (text) => {
+    if (isThinking) return;
+    const ts      = new Date().toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
     const langInfo = LANGUAGES.find(l => l.code === userLang) || LANGUAGES[0];
-    const isTranslating = userLang !== "en-US";
+    const multilingual = userLang !== "en-US";
+    const userLangCode = userLang.split("-")[0]; // "hi-IN" → "hi"
 
-    // If user is speaking in their language, translate to English first for analysis
-    let analysisText = text;
-    let displayTranslated = null;
-
-    if (isTranslating && forceSpeaker === "you") {
-      setTranslating(true);
-      try {
-        const r = await apiTranslate(text, "English");
-        analysisText = r.translated || text;
-      } catch { /* use original */ }
-      setTranslating(false);
-    }
-
-    const msg = { role:"user", content:`Spoken: "${analysisText}"` };
-    const h2  = [...history, msg];
-    setHistory(h2);
-    if (isThinking && !forceSpeaker) return;
     setIsThinking(true);
+    setTranslating(multilingual);
     setError(null);
 
     try {
-      const res = await apiAnalyze(analysisText, situation, stateCode, description, h2);
-      const speaker = forceSpeaker || res.speaker || "officer";
+      // Single Gemini call: detects language, classifies speaker, translates user speech,
+      // and gives legal coaching — all in one round-trip
+      const res = await apiAnalyze(text, situation, stateCode, description, history, multilingual ? userLangCode : "en");
+      const speaker     = res.speaker || "officer";
+      const englishText = res.english_text || "";  // set when user spoke in their language
 
-      // If officer spoke and user has a non-English language, translate officer speech for display
-      if (isTranslating && speaker === "officer") {
+      // Build transcript entry
+      let displayText  = text;
+      let originalText = null;
+
+      if (multilingual && speaker === "officer") {
+        // Officer spoke English → translate to user's language for display + TTS
         setTranslating(true);
         try {
-          const r = await apiTranslate(text, langInfo.gemini);
-          displayTranslated = r.translated;
-        } catch { /* fallback to original */ }
+          const tr = await apiTranslate(text, langInfo.gemini);
+          if (tr.translated) {
+            displayText  = tr.translated;
+            originalText = text;            // keep original for reference
+            // Speak translated officer speech aloud in user's language
+            if (window.speechSynthesis) {
+              const utt = new SpeechSynthesisUtterance(tr.translated);
+              utt.lang = userLang; utt.rate = 0.9;
+              window.speechSynthesis.speak(utt);
+            }
+          }
+        } catch { /* display original if translation fails */ }
         setTranslating(false);
-        // Speak translated text aloud via TTS
-        if (displayTranslated && window.speechSynthesis) {
-          const utt = new SpeechSynthesisUtterance(displayTranslated);
-          utt.lang = userLang;
-          utt.rate = 0.9;
-          window.speechSynthesis.speak(utt);
-        }
+      } else if (multilingual && speaker === "you" && englishText) {
+        // User spoke in their language — show their words, note English translation
+        originalText = englishText;         // English translation shown as subtext
       }
 
-      setTranscript(p => [...p, {
-        text: displayTranslated ? `${displayTranslated}` : text,
-        originalText: displayTranslated ? text : null,
-        ts,
-        speaker,
-        id: Date.now() + Math.random(),
-      }]);
+      setTranscript(p => [...p, { text: displayText, originalText, ts, speaker, id: Date.now() + Math.random() }]);
+
+      // Update history using English text for accurate legal analysis
+      const historyText = (multilingual && speaker === "you" && englishText) ? englishText : text;
+      const h2 = [...history, { role:"user", content:`Spoken: "${historyText}"` }];
+      setHistory(h2);
 
       if (res.suggestion) {
         setHistory(p => [...p, { role:"assistant", content:JSON.stringify(res) }]);
-        setSuggestions(p => [...p, { ...res, id:Date.now(), time:ts, trigger:text }]);
+        setSuggestions(p => [...p, { ...res, id:Date.now(), time:ts, trigger:displayText }]);
       }
     } catch {
-      setTranscript(p => [...p, { text, ts, speaker: forceSpeaker || "officer", id: Date.now() + Math.random() }]);
+      setTranscript(p => [...p, { text, ts, speaker:"officer", id: Date.now() + Math.random() }]);
       setError("Analysis failed — check backend is running.");
     }
     setIsThinking(false);
+    setTranslating(false);
   }, [situation, stateCode, description, history, isThinking, userLang]);
 
-  const { listening, supported, start: startSpeech, stop: stopSpeech } = useSpeech(handleSpeech, "en-US");
-
-  // One-shot recognition in the user's language
-  const handleUserSpeak = useCallback(() => {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) return;
-    const r = new SR();
-    r.lang = userLang;
-    r.continuous = false;
-    r.interimResults = false;
-    setUserSpeaking(true);
-    r.onresult = e => {
-      const t = e.results[0][0].transcript.trim();
-      if (t) handleSpeech(t, "you");
-    };
-    r.onerror = () => setUserSpeaking(false);
-    r.onend   = () => setUserSpeaking(false);
-    r.start();
-  }, [userLang, handleSpeech]);
+  // Run recognizer in user's language — Chrome handles bilingual sessions natively
+  // Gemini detects which language was spoken and classifies speaker accordingly
+  const { listening, supported, start: startSpeech, stop: stopSpeech } = useSpeech(handleSpeech, userLang);
 
   const flipSpeaker = useCallback((id) => {
     setTranscript(p => p.map(t =>
@@ -797,21 +778,7 @@ Thank you,
                   {userLang !== "en-US" && ` · ${LANGUAGES.find(l=>l.code===userLang)?.label}`}
                 </div>
               </div>
-              <div style={{display:"flex", gap:8, alignItems:"center"}}>
-                {userLang !== "en-US" && (
-                  <button
-                    style={{
-                      background: userSpeaking ? P.blue : P.blueBg,
-                      border: `1.5px solid ${P.blue}`,
-                      borderRadius:8, padding:"8px 14px", color: userSpeaking ? P.white : P.blue,
-                      fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"Inter, system-ui, sans-serif",
-                    }}
-                    onClick={handleUserSpeak} disabled={userSpeaking}>
-                    {userSpeaking ? "🎙 Listening…" : `🎙 Speak (${LANGUAGES.find(l=>l.code===userLang)?.label})`}
-                  </button>
-                )}
-                <button style={s.stopBtn} onClick={stopListening}>Stop Session</button>
-              </div>
+              <button style={s.stopBtn} onClick={stopListening}>Stop Session</button>
             </div>
 
             {error && <ErrBanner msg={error} />}
@@ -820,8 +787,12 @@ Thank you,
               {suggestions.length === 0 ? (
                 <div style={s.emptyFeed}>
                   <div style={{fontSize:36,marginBottom:10}}>👂</div>
-                  <div style={{fontSize:14,color:P.slate,marginBottom:4}}>Listening for legally significant moments</div>
-                  <div style={{fontSize:12,color:P.slateL}}>Speak clearly near your device's microphone</div>
+                  <div style={{fontSize:14,color:P.slate,marginBottom:4}}>Monitoring conversation automatically</div>
+                  <div style={{fontSize:12,color:P.slateL}}>
+                    {userLang !== "en-US"
+                      ? `Officer's English is translated to ${LANGUAGES.find(l=>l.code===userLang)?.label} · Your ${LANGUAGES.find(l=>l.code===userLang)?.label} is analyzed in English`
+                      : "Legal hints will appear here when significant moments are detected"}
+                  </div>
                 </div>
               ) : suggestions.map(sug => <SugCard key={sug.id} s={sug} />)}
               <div ref={feedEndRef} />
