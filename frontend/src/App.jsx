@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { useSessionSocket } from "./useSessionSocket";
 
 const API_BASE = import.meta.env.VITE_API_URL || "";
 
@@ -362,60 +363,59 @@ export default function App() {
     fetch(`${API_BASE}/health`).then(r => setBackendOk(r.ok)).catch(() => setBackendOk(false));
   }, []);
 
-  // ── Audio chunk handler — Gemini does transcription + analysis in one call ─
-  const handleChunk = useCallback(async (audio_base64, media_type) => {
-    if (isThinkingRef.current) return;
+  // ── Analysis result handler — called by both WebSocket and HTTP fallback ──
+  const handleAnalysisResult = useCallback((res) => {
     const ts           = new Date().toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
     const multilingual = userLang !== "en-US";
-    const userLangCode = userLang.split("-")[0];
 
+    // Skip empty / silent chunks
+    if (!res.transcribed || !res.speaker) { setIsThinking(false); return; }
+
+    const speaker     = res.speaker;
+    const displayText = multilingual && speaker === "officer" && res.translated_for_user
+      ? res.translated_for_user
+      : res.transcribed;
+    const originalText = multilingual && speaker === "officer" && res.translated_for_user
+      ? res.transcribed
+      : (multilingual && speaker === "you" && res.english_text ? res.english_text : null);
+
+    // Speak officer's translated words aloud in user's language
+    if (multilingual && speaker === "officer" && res.translated_for_user && window.speechSynthesis) {
+      const utt = new SpeechSynthesisUtterance(res.translated_for_user);
+      utt.lang = userLang; utt.rate = 0.9;
+      window.speechSynthesis.speak(utt);
+    }
+
+    setTranscript(p => [...p, { text: displayText, originalText, ts, speaker, id: Date.now() + Math.random() }]);
+
+    // History always uses English for accurate legal analysis
+    const historyText = (multilingual && speaker === "you" && res.english_text)
+      ? res.english_text : res.transcribed;
+    setHistory(p => {
+      const h2 = [...p, { role:"user", content:`Spoken: "${historyText}"` }];
+      return res.suggestion ? [...h2, { role:"assistant", content:JSON.stringify(res) }] : h2;
+    });
+
+    if (res.suggestion) {
+      setSuggestions(p => [...p, { ...res, id:Date.now(), time:ts, trigger:displayText }]);
+    }
+
+    setIsThinking(false);
+    setError(null);
+  }, [userLang]);
+
+  // ── WebSocket session hook ─────────────────────────────────────────────────
+  const { wsStatus, connectSession, sendAudio, disconnectSession } = useSessionSocket({
+    onAnalysis: handleAnalysisResult,
+  });
+
+  // ── Audio chunk handler — sends via WebSocket (persistent connection) ──────
+  const handleChunk = useCallback((audio_base64, media_type) => {
+    if (isThinkingRef.current) return;
     setIsThinking(true);
     setError(null);
-
-    try {
-      const res = await apiTranscribeAnalyze(
-        audio_base64, media_type,
-        situation, stateCode, description,
-        historyRef.current,
-        multilingual ? userLangCode : "en",
-      );
-
-      // Skip empty / silent chunks
-      if (!res.transcribed || !res.speaker) { setIsThinking(false); return; }
-
-      const speaker          = res.speaker;
-      const displayText      = multilingual && speaker === "officer" && res.translated_for_user
-        ? res.translated_for_user   // officer's words in user's language
-        : res.transcribed;          // verbatim
-      const originalText     = multilingual && speaker === "officer" && res.translated_for_user
-        ? res.transcribed           // English original shown as subtext
-        : (multilingual && speaker === "you" && res.english_text ? res.english_text : null);
-
-      // Speak officer's translated words aloud in user's language
-      if (multilingual && speaker === "officer" && res.translated_for_user && window.speechSynthesis) {
-        const utt = new SpeechSynthesisUtterance(res.translated_for_user);
-        utt.lang = userLang; utt.rate = 0.9;
-        window.speechSynthesis.speak(utt);
-      }
-
-      setTranscript(p => [...p, { text: displayText, originalText, ts, speaker, id: Date.now() + Math.random() }]);
-
-      // History always uses English for accurate legal analysis
-      const historyText = (multilingual && speaker === "you" && res.english_text)
-        ? res.english_text : res.transcribed;
-      setHistory(p => {
-        const h2 = [...p, { role:"user", content:`Spoken: "${historyText}"` }];
-        return res.suggestion ? [...h2, { role:"assistant", content:JSON.stringify(res) }] : h2;
-      });
-
-      if (res.suggestion) {
-        setSuggestions(p => [...p, { ...res, id:Date.now(), time:ts, trigger:displayText }]);
-      }
-    } catch {
-      setError("Analysis failed — check backend is running.");
-    }
-    setIsThinking(false);
-  }, [situation, stateCode, description, userLang]);
+    sendAudio(audio_base64, media_type);
+  }, [sendAudio]);
 
   const { capturing, supported, audioUrl, start: startCapture, stop: stopCapture, reset: resetAudio } = useAudioCapture(handleChunk);
 
@@ -455,12 +455,22 @@ export default function App() {
       window.speechSynthesis.speak(utt);
     }
 
-    startCapture();    // starts MediaRecorder + Gemini analysis loop
+    // Open WebSocket session (replaces per-chunk HTTP POST)
+    const multilingual = userLang !== "en-US";
+    connectSession({
+      situation,
+      state: stateCode,
+      description,
+      user_lang: multilingual ? userLang.split("-")[0] : "en",
+    });
+
+    startCapture();    // starts MediaRecorder + audio chunk loop
     setScreen("s3_listening");
   }
 
   function stopListening() {
     stopCapture();
+    disconnectSession();
     // Save session to localStorage
     const session = {
       id: Date.now(),

@@ -20,7 +20,7 @@ from typing import Optional
 from google import genai
 from google.genai import types
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -322,6 +322,114 @@ def calculate_points(state: str, violation_codes: list) -> dict:
 @app.get("/health")
 def health():
     return {"status": "ok", "version": "2.0.0"}
+
+
+# ── WebSocket session endpoint ────────────────────────────────────────────────
+async def _do_transcribe_analyze(audio_base64: str, media_type: str, ctx: dict) -> dict:
+    """Core transcription + analysis logic shared by HTTP and WebSocket endpoints."""
+    laws = query_laws("", ctx["state"], ctx["situation"], n=5)
+    law_block = "\n\n".join([
+        f"[LAW {i+1}] {l['title']}\nRef: {l['law_reference']}\n"
+        f"Urgency: {l['urgency'].upper()}\nAdvise: {l['actionable_response']}"
+        for i, l in enumerate(laws)
+    ])
+
+    multilingual = ctx["user_lang"] and ctx["user_lang"] != "en"
+    lang_note = ""
+    if multilingual:
+        lang_note = f"""
+MULTILINGUAL: The detained person speaks {ctx['user_lang']}.
+- Officer speaks ENGLISH → set speaker="officer". Also put the officer's words translated to {ctx['user_lang']} in "translated_for_user".
+- Detained person speaks {ctx['user_lang']} → set speaker="you". Put their words translated to English in "english_text".
+"""
+
+    system = f"""You are a real-time AI legal rights coach monitoring a live {ctx['situation'].replace('_',' ')} encounter in {ctx['state']}.
+
+Listen to the audio chunk carefully.
+{lang_note}
+LAWS TO REFERENCE:
+{law_block}
+
+Rules:
+- "officer" = commanding, authoritative, requests for ID/documents, stating charges, asking to step out
+- "you" = detained person responding, asking about rights, quieter/more hesitant
+- If the audio is silent, unclear, or background noise only → return transcribed="" and speaker=""
+- Coaching suggestion must be actionable, max 1 sentence
+
+Output ONLY valid JSON, no markdown:
+{{"transcribed":"what was said verbatim","speaker":"officer|you|","english_text":"","translated_for_user":"","urgency":"red|yellow|green","suggestion":"","law":""}}"""
+
+    msgs = [{"role": "user", "content": "Transcribe and analyze this audio."}]
+    raw = await call_ai(system, msgs, max_tokens=400,
+                        image_base64=audio_base64, media_type=media_type)
+    return _parse_json(raw, {
+        "transcribed": "", "speaker": "", "english_text": "",
+        "translated_for_user": "", "urgency": "green", "suggestion": "", "law": "",
+    })
+
+
+@app.websocket("/ws/session")
+async def ws_session(websocket: WebSocket):
+    """
+    Persistent WebSocket for real-time audio analysis.
+    Eliminates per-chunk HTTP overhead and chunking issues during translation.
+
+    Message protocol (client → server):
+      { "type": "init", "situation": "...", "state": "...", "description": "...", "user_lang": "en" }
+      { "type": "audio", "data": "<base64>", "media_type": "audio/webm" }
+      { "type": "translate", "text": "...", "target_lang": "Spanish" }
+
+    Message protocol (server → client):
+      { "type": "ready" }
+      { "type": "analysis", "transcribed": "...", "speaker": "...", ... }
+      { "type": "translation", "translated": "..." }
+      { "type": "error", "message": "..." }
+    """
+    await websocket.accept()
+
+    # Session context — populated by "init" message
+    ctx = {"situation": "", "state": "", "description": "", "user_lang": "en"}
+
+    try:
+        while True:
+            text = await websocket.receive_text()
+            msg = json.loads(text)
+            msg_type = msg.get("type")
+
+            if msg_type == "init":
+                ctx = {
+                    "situation":   msg.get("situation", ""),
+                    "state":       msg.get("state", ""),
+                    "description": msg.get("description", ""),
+                    "user_lang":   msg.get("user_lang", "en"),
+                }
+                await websocket.send_text(json.dumps({"type": "ready"}))
+
+            elif msg_type == "audio":
+                result = await _do_transcribe_analyze(
+                    audio_base64=msg.get("data", ""),
+                    media_type=msg.get("media_type", "audio/webm"),
+                    ctx=ctx,
+                )
+                await websocket.send_text(json.dumps({"type": "analysis", **result}))
+
+            elif msg_type == "translate":
+                system = (
+                    f"You are a precise, literal translator. "
+                    f"Translate the following text to {msg.get('target_lang', 'English')}. "
+                    f"Output ONLY the translated text — no explanations, no quotes."
+                )
+                msgs = [{"role": "user", "content": msg.get("text", "")}]
+                result = await call_ai(system, msgs, max_tokens=400)
+                await websocket.send_text(json.dumps({"type": "translation", "translated": result.strip()}))
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        try:
+            await websocket.send_text(json.dumps({"type": "error", "message": str(e)}))
+        except Exception:
+            pass
 
 
 @app.post("/prepare")
