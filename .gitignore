@@ -4,15 +4,19 @@ __pycache__/
 *.pyo
 .env
 venv/
+.venv/
 env/
 *.egg-info/
 
 # ChromaDB (rebuild locally — too large for git)
-backend/law_coach_db/
+backend/lawaier_db/
 
 # Node
 frontend/node_modules/
 frontend/dist/
+
+# Generated env (contains project IDs — do not commit)
+set_env.sh
 
 # OS
 .DS_Store

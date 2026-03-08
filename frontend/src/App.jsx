@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { useSessionSocket } from "./useSessionSocket";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_URL || "";
 
 // ─── Palette ───────────────────────────────────────────────────────────────
 // Single blue palette: navy text, slate grays, white backgrounds, blue accents
@@ -42,6 +43,26 @@ const URGENCY = {
   yellow: { bg:P.amberBg, border:P.amberBd, text:P.amber, label:"Caution",   icon:"🟡" },
   green:  { bg:P.greenBg, border:P.greenBd, text:P.green, label:"You're OK", icon:"🟢" },
 };
+
+const SPEAKER_META = {
+  officer: { label:"Officer", color:"#b91c1c", bg:"#fee2e2" },
+  you:     { label:"You",     color:"#1d4ed8", bg:"#dbeafe" },
+  system:  { label:"System",  color:"#64748b", bg:"#f1f5f9" },
+};
+
+const LANGUAGES = [
+  { code: "en-US", label: "English",    gemini: "English"    },
+  { code: "es-ES", label: "Español",    gemini: "Spanish"    },
+  { code: "fr-FR", label: "Français",   gemini: "French"     },
+  { code: "de-DE", label: "Deutsch",    gemini: "German"     },
+  { code: "zh-CN", label: "中文",        gemini: "Chinese"    },
+  { code: "ar-SA", label: "العربية",    gemini: "Arabic"     },
+  { code: "hi-IN", label: "हिंदी",      gemini: "Hindi"      },
+  { code: "pt-BR", label: "Português",  gemini: "Portuguese" },
+  { code: "ru-RU", label: "Русский",    gemini: "Russian"    },
+  { code: "ja-JP", label: "日本語",     gemini: "Japanese"   },
+  { code: "ko-KR", label: "한국어",     gemini: "Korean"     },
+];
 
 const DOC_LABELS = {
   judicial_warrant:"Judicial Warrant", administrative_warrant:"Admin Warrant",
@@ -173,8 +194,6 @@ const post = (url, body) =>
     .then(r => { if(!r.ok) throw new Error(`${r.status}`); return r.json(); });
 
 const apiPrepare         = (situation, state, description) => post("/prepare", { situation, state, description });
-const apiAnalyze         = (spoken_text, situation, state, description, conversation_history) =>
-  post("/analyze", { spoken_text, situation, state, description, conversation_history });
 const apiAnalyzeDocument = (image_base64, media_type, state, situation, description) =>
   post("/analyze-document", { image_base64, media_type, state, situation, description });
 const apiAnalyzeVideo    = (video_base64, media_type, state, situation, description) =>
@@ -182,25 +201,113 @@ const apiAnalyzeVideo    = (video_base64, media_type, state, situation, descript
 const apiGenerateReport  = (body) =>
   fetch(`${API_BASE}/generate-report`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) })
     .then(r => { if(!r.ok) throw new Error(`${r.status}`); return r.blob(); });
+const apiTranslate = (text, target_lang) => post("/translate", { text, target_lang });
+const apiAnalyze   = (spoken_text, situation, state, description, conversation_history, user_lang = "en") =>
+  post("/analyze", { spoken_text, situation, state, description, conversation_history, user_lang });
+const apiTranscribeAnalyze = (audio_base64, media_type, situation, state, description, conversation_history, user_lang = "en") =>
+  post("/transcribe-analyze", { audio_base64, media_type, situation, state, description, conversation_history, user_lang });
 
-// ─── Speech hook ───────────────────────────────────────────────────────────
-function useSpeech(onResult) {
-  const ref = useRef(null);
-  const [listening, setListening] = useState(false);
+
+// ─── Audio capture hook (Gemini-based, replaces Web Speech API) ────────────
+// FIX: We stop+restart MediaRecorder every 4s so each chunk is a COMPLETE,
+// self-contained audio file. Using timeslice(4000) produces WebM fragments —
+// only the first chunk has the header, subsequent ones are broken → Gemini 400.
+function useAudioCapture(onChunk) {
+  const streamRef  = useRef(null);
+  const activeRef  = useRef(false);
+  const allBlobs   = useRef([]);
+  const onChunkRef = useRef(onChunk);
+  const timerRef   = useRef(null);
+  const [capturing, setCapturing] = useState(false);
   const [supported, setSupported] = useState(true);
-  useEffect(() => {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) { setSupported(false); return; }
-    const r = new SR();
-    r.continuous = true; r.interimResults = false; r.lang = "en-US";
-    r.onresult = e => { const t = e.results[e.results.length-1][0].transcript.trim(); if(t) onResult(t); };
-    r.onerror  = () => {};
-    r.onend    = () => setListening(false);
-    ref.current = r;
-  }, [onResult]);
-  const start = useCallback(() => { ref.current?.start(); setListening(true); }, []);
-  const stop  = useCallback(() => { ref.current?.stop();  setListening(false); }, []);
-  return { listening, supported, start, stop };
+  const [audioUrl,  setAudioUrl]  = useState(null);
+
+  useEffect(() => { onChunkRef.current = onChunk; }, [onChunk]);
+
+  const recordWindow = useCallback((stream, mimeType, baseType) => {
+    if (!activeRef.current) return;
+
+    const chunks = [];
+    let mr;
+    try { mr = new MediaRecorder(stream, { mimeType }); }
+    catch { mr = new MediaRecorder(stream); }
+
+    mr.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+
+    mr.onstop = () => {
+      const blob = new Blob(chunks, { type: baseType });
+      allBlobs.current.push(blob);
+
+      if (blob.size > 1500 && activeRef.current) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const b64 = reader.result.split(",")[1];
+          onChunkRef.current(b64, baseType);
+        };
+        reader.readAsDataURL(blob);
+      }
+
+      if (activeRef.current) {
+        timerRef.current = setTimeout(() => recordWindow(stream, mimeType, baseType), 100);
+      } else {
+        if (allBlobs.current.length > 0) {
+          const full = new Blob(allBlobs.current, { type: baseType });
+          setAudioUrl(URL.createObjectURL(full));
+        }
+        stream.getTracks().forEach(t => t.stop());
+        setCapturing(false);
+      }
+    };
+
+    mr.start();
+    timerRef.current = setTimeout(() => { try { mr.stop(); } catch {} }, 4000);
+  }, []);
+
+  const start = useCallback(async () => {
+    setAudioUrl(null);
+    allBlobs.current = [];
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+
+      const mimeType =
+        MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" :
+        MediaRecorder.isTypeSupported("audio/webm")             ? "audio/webm"             :
+        MediaRecorder.isTypeSupported("audio/ogg;codecs=opus")  ? "audio/ogg;codecs=opus"  :
+                                                                   "audio/ogg";
+      const baseType = mimeType.split(";")[0];
+
+      activeRef.current = true;
+      setCapturing(true);
+      recordWindow(stream, mimeType, baseType);
+    } catch {
+      setSupported(false);
+    }
+  }, [recordWindow]);
+
+  const stop = useCallback(() => {
+    activeRef.current = false;
+    clearTimeout(timerRef.current);
+  }, []);
+
+  const reset = useCallback(() => { setAudioUrl(null); allBlobs.current = []; }, []);
+
+  return { capturing, supported, audioUrl, start, stop, reset };
+}
+
+// ─── Session management ────────────────────────────────────────────────────
+const SESSION_KEY = "lawaier_sessions";
+
+function loadSessions() {
+  try { return JSON.parse(localStorage.getItem(SESSION_KEY) || "[]"); } catch { return []; }
+}
+
+function saveSession(session) {
+  try {
+    const existing = loadSessions();
+    const updated  = [session, ...existing].slice(0, 20); // keep latest 20
+    localStorage.setItem(SESSION_KEY, JSON.stringify(updated));
+  } catch { /* localStorage unavailable */ }
 }
 
 // ─── Main App ──────────────────────────────────────────────────────────────
@@ -236,8 +343,19 @@ export default function App() {
   // Lawyers
   const [showLawyers, setShowLawyers] = useState(false);
 
-  // Results tab: "suggestions" | "document" | "video" | "lawyers"
+  // Results tab: "suggestions" | "transcript" | "document" | "video" | "lawyers"
   const [activeTab, setActiveTab] = useState("suggestions");
+
+  const [userLang,       setUserLang]       = useState("en-US");
+  const [translating,    setTranslating]    = useState(false);
+  const [sessions,       setSessions]       = useState(loadSessions);
+  const [showSessions,   setShowSessions]   = useState(false);
+
+  // Use refs for values that change frequently — keeps handleSpeech stable
+  const historyRef    = useRef([]);
+  const isThinkingRef = useRef(false);
+  useEffect(() => { historyRef.current = history; },    [history]);
+  useEffect(() => { isThinkingRef.current = isThinking; }, [isThinking]);
 
   const feedEndRef = useRef(null);
   useEffect(() => { feedEndRef.current?.scrollIntoView({ behavior:"smooth" }); }, [suggestions]);
@@ -245,27 +363,69 @@ export default function App() {
     fetch(`${API_BASE}/health`).then(r => setBackendOk(r.ok)).catch(() => setBackendOk(false));
   }, []);
 
-  // ── Speech ──────────────────────────────────────────────────────────────
-  const handleSpeech = useCallback(async (text) => {
-    const ts = new Date().toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
-    setTranscript(p => [...p, { text, ts }]);
-    const msg = { role:"user", content:`Other party said: "${text}"` };
-    const h2  = [...history, msg];
-    setHistory(h2);
-    if (isThinking) return;
+  // ── Analysis result handler — called by both WebSocket and HTTP fallback ──
+  const handleAnalysisResult = useCallback((res) => {
+    const ts           = new Date().toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+    const multilingual = userLang !== "en-US";
+
+    // Skip empty / silent chunks
+    if (!res.transcribed || !res.speaker) { setIsThinking(false); return; }
+
+    const speaker     = res.speaker;
+    const displayText = multilingual && speaker === "officer" && res.translated_for_user
+      ? res.translated_for_user
+      : res.transcribed;
+    const originalText = multilingual && speaker === "officer" && res.translated_for_user
+      ? res.transcribed
+      : (multilingual && speaker === "you" && res.english_text ? res.english_text : null);
+
+    // Speak officer's translated words aloud in user's language
+    if (multilingual && speaker === "officer" && res.translated_for_user && window.speechSynthesis) {
+      const utt = new SpeechSynthesisUtterance(res.translated_for_user);
+      utt.lang = userLang; utt.rate = 0.9;
+      window.speechSynthesis.speak(utt);
+    }
+
+    setTranscript(p => [...p, { text: displayText, originalText, ts, speaker, id: Date.now() + Math.random() }]);
+
+    // History always uses English for accurate legal analysis
+    const historyText = (multilingual && speaker === "you" && res.english_text)
+      ? res.english_text : res.transcribed;
+    setHistory(p => {
+      const h2 = [...p, { role:"user", content:`Spoken: "${historyText}"` }];
+      return res.suggestion ? [...h2, { role:"assistant", content:JSON.stringify(res) }] : h2;
+    });
+
+    if (res.suggestion) {
+      setSuggestions(p => [...p, { ...res, id:Date.now(), time:ts, trigger:displayText }]);
+    }
+
+    setIsThinking(false);
+    setError(null);
+  }, [userLang]);
+
+  // ── WebSocket session hook ─────────────────────────────────────────────────
+  const { wsStatus, connectSession, sendAudio, disconnectSession } = useSessionSocket({
+    onAnalysis: handleAnalysisResult,
+  });
+
+  // ── Audio chunk handler — sends via WebSocket (persistent connection) ──────
+  const handleChunk = useCallback((audio_base64, media_type) => {
+    if (isThinkingRef.current) return;
     setIsThinking(true);
     setError(null);
-    try {
-      const res = await apiAnalyze(text, situation, stateCode, description, h2);
-      if (res.suggestion) {
-        setHistory(p => [...p, { role:"assistant", content:JSON.stringify(res) }]);
-        setSuggestions(p => [...p, { ...res, id:Date.now(), time:ts, trigger:text }]);
-      }
-    } catch { setError("Analysis failed — check backend is running."); }
-    setIsThinking(false);
-  }, [situation, stateCode, description, history, isThinking]);
+    sendAudio(audio_base64, media_type);
+  }, [sendAudio]);
 
-  const { listening, supported, start: startSpeech, stop: stopSpeech } = useSpeech(handleSpeech);
+  const { capturing, supported, audioUrl, start: startCapture, stop: stopCapture, reset: resetAudio } = useAudioCapture(handleChunk);
+
+  const flipSpeaker = useCallback((id) => {
+    setTranscript(p => p.map(t =>
+      t.id === id
+        ? { ...t, speaker: t.speaker === "officer" ? "you" : t.speaker === "you" ? "officer" : t.speaker }
+        : t
+    ));
+  }, []);
 
   // ── Nav ─────────────────────────────────────────────────────────────────
   async function goToState() {
@@ -278,15 +438,55 @@ export default function App() {
     setPreparing(true); setError(null);
     try { await apiPrepare(situation, stateCode, description); } catch { /* fallback ok */ }
     setPreparing(false);
-    setSuggestions([]); setTranscript([]); setHistory([]);
+
+    const ts = new Date().toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+    const announcement = "This conversation is now being recorded for your safety and legal protection.";
+    setSuggestions([]);
+    setHistory([]);
     setDocFindings([]); setScanResult(null); setVideoResult(null);
+    resetAudio();
+    setTranscript([{ text: announcement, ts, speaker: "system" }]);
     setStartTime(Date.now());
-    startSpeech();
+
+    // Announce via text-to-speech
+    if (window.speechSynthesis) {
+      const utt = new SpeechSynthesisUtterance(announcement);
+      utt.rate = 0.95;
+      window.speechSynthesis.speak(utt);
+    }
+
+    // Open WebSocket session (replaces per-chunk HTTP POST)
+    const multilingual = userLang !== "en-US";
+    connectSession({
+      situation,
+      state: stateCode,
+      description,
+      user_lang: multilingual ? userLang.split("-")[0] : "en",
+    });
+
+    startCapture();    // starts MediaRecorder + audio chunk loop
     setScreen("s3_listening");
   }
 
   function stopListening() {
-    stopSpeech();
+    stopCapture();
+    disconnectSession();
+    // Save session to localStorage
+    const session = {
+      id: Date.now(),
+      situation,
+      sitLabel: SITUATIONS.find(s => s.id === situation)?.label || situation,
+      sitIcon:  SITUATIONS.find(s => s.id === situation)?.icon  || "⚖",
+      state: stateCode,
+      date: new Date().toLocaleDateString(),
+      time: new Date().toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}),
+      duration: startTime ? Math.floor((Date.now() - startTime) / 1000) : 0,
+      transcript: [...transcript],
+      suggestions: [...suggestions],
+      description,
+    };
+    saveSession(session);
+    setSessions(loadSessions());
     setScreen("s4_results");
     setActiveTab("suggestions");
   }
@@ -296,6 +496,7 @@ export default function App() {
     setSuggestions([]); setTranscript([]); setHistory([]);
     setDocFindings([]); setScanResult(null);
     setVideoResult(null); setVideoName("");
+    resetAudio();
     setError(null); setReportReady(false); setShowLawyers(false);
     setScreen("s1_situation");
   }
@@ -356,7 +557,7 @@ export default function App() {
       });
       const url  = URL.createObjectURL(blob);
       const link = document.createElement("a");
-      link.href = url; link.download = `law-coach-report-${Date.now()}.pdf`;
+      link.href = url; link.download = `lawaier-report-${Date.now()}.pdf`;
       link.click(); URL.revokeObjectURL(url);
       setReportReady(true);
     } catch { setError("Report generation failed — check backend is running."); }
@@ -374,7 +575,7 @@ I am seeking legal representation regarding a recent ${sit} encounter in ${state
 
 Summary: ${description || "Please see attached incident report."}
 
-I have attached a detailed AI Law Coach incident report which includes the full encounter timeline, rights invoked, AI coaching suggestions provided, and any evidence analyzed.
+I have attached a detailed AI LawAIer incident report which includes the full encounter timeline, rights invoked, AI coaching suggestions provided, and any evidence analyzed.
 
 I would greatly appreciate the opportunity to discuss my case.
 
@@ -394,16 +595,88 @@ Thank you,
       {/* ── HEADER ── */}
       <header style={s.header}>
         <div style={s.headerLeft}>
-          <span style={s.headerLogo}>⚖ Law Coach</span>
+          <span style={s.headerLogo}>⚖ LawAIer</span>
           {situation && stateCode && screen !== "s1_situation" && screen !== "s2_state" && (
             <span style={s.headerPill}>{sitInfo?.label} · {stateCode}</span>
           )}
         </div>
         <div style={s.headerRight}>
+          {sessions.length > 0 && (
+            <button onClick={() => setShowSessions(p=>!p)} style={{
+              background:"none", border:`1px solid ${P.border}`, borderRadius:6,
+              padding:"4px 10px", fontSize:12, fontWeight:600, color:P.slate,
+              cursor:"pointer", fontFamily:"Inter, system-ui, sans-serif", marginRight:8,
+            }}>
+              History ({sessions.length})
+            </button>
+          )}
           <span style={{...s.statusDot, background: backendOk===null?P.slateXL : backendOk?P.green:P.red}} />
           <span style={s.statusText}>{backendOk===null?"connecting…":backendOk?"Connected":"Offline"}</span>
         </div>
       </header>
+
+      {/* ── SESSIONS PANEL ── */}
+      {showSessions && (
+        <div style={{
+          position:"fixed", top:0, right:0, bottom:0, width:360, maxWidth:"90vw",
+          background:P.white, boxShadow:"-4px 0 24px rgba(0,0,0,0.12)",
+          zIndex:1000, overflowY:"auto", padding:24,
+        }}>
+          <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20}}>
+            <div style={{fontSize:16, fontWeight:700, color:P.navy}}>Past Sessions</div>
+            <button onClick={() => setShowSessions(false)} style={{
+              background:"none", border:"none", fontSize:20, cursor:"pointer", color:P.slateL, lineHeight:1,
+            }}>×</button>
+          </div>
+          {sessions.length === 0 ? (
+            <div style={{color:P.slateL, fontSize:13}}>No past sessions yet.</div>
+          ) : sessions.map(sess => (
+            <div key={sess.id} style={{
+              border:`1px solid ${P.border}`, borderRadius:10, padding:14, marginBottom:12, background:P.bg,
+            }}>
+              <div style={{display:"flex", gap:8, alignItems:"center", marginBottom:6}}>
+                <span style={{fontSize:18}}>{sess.sitIcon}</span>
+                <div>
+                  <div style={{fontWeight:700, color:P.navy, fontSize:13}}>{sess.sitLabel} · {sess.state}</div>
+                  <div style={{fontSize:11, color:P.slateL}}>{sess.date} at {sess.time}</div>
+                </div>
+              </div>
+              <div style={{display:"flex", gap:8, flexWrap:"wrap", marginBottom:8}}>
+                <span style={{fontSize:11, background:P.blueBg, color:P.blue, borderRadius:4, padding:"2px 8px", fontWeight:600}}>
+                  {sess.transcript?.filter(t=>t.speaker!=="system").length || 0} exchanges
+                </span>
+                <span style={{fontSize:11, background:P.redBg, color:P.red, borderRadius:4, padding:"2px 8px", fontWeight:600}}>
+                  {sess.suggestions?.filter(s=>s.urgency==="red").length || 0} critical
+                </span>
+                <span style={{fontSize:11, background:P.amberBg, color:P.amber, borderRadius:4, padding:"2px 8px", fontWeight:600}}>
+                  {Math.floor((sess.duration||0)/60)}m {(sess.duration||0)%60}s
+                </span>
+              </div>
+              {sess.transcript && sess.transcript.filter(t=>t.speaker!=="system").slice(0,2).map((t,i) => {
+                const sp = SPEAKER_META[t.speaker] || SPEAKER_META.officer;
+                return (
+                  <div key={i} style={{fontSize:11, color:P.slate, marginBottom:3, display:"flex", gap:6}}>
+                    <span style={{background:sp.bg, color:sp.color, borderRadius:3, padding:"1px 5px", fontWeight:700, flexShrink:0}}>{sp.label}</span>
+                    <span style={{overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>"{t.text}"</span>
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+          <button onClick={() => {
+            if (window.confirm("Delete all session history?")) {
+              localStorage.removeItem(SESSION_KEY);
+              setSessions([]);
+            }
+          }} style={{
+            marginTop:8, padding:"8px 16px", border:`1px solid ${P.redBd}`, borderRadius:6,
+            background:P.redBg, color:P.red, fontSize:12, fontWeight:600, cursor:"pointer",
+            fontFamily:"Inter, system-ui, sans-serif", width:"100%",
+          }}>
+            Clear All History
+          </button>
+        </div>
+      )}
 
       {/* ── STEP BAR (steps 1-4 only on setup screens) ── */}
       {(screen==="s1_situation"||screen==="s2_state") && (
@@ -490,6 +763,34 @@ Thank you,
                 value={description} onChange={e => setDescription(e.target.value)} />
             </div>
 
+            {/* Language selector */}
+            <div style={s.descSection}>
+              <label style={s.label}>
+                My language <span style={{color:P.slateL}}>(for international travelers)</span>
+              </label>
+              <div style={{display:"flex", flexWrap:"wrap", gap:8, marginTop:8}}>
+                {LANGUAGES.map(lang => (
+                  <button key={lang.code}
+                    style={{
+                      padding:"6px 14px", borderRadius:20, fontSize:13, fontWeight:600, cursor:"pointer",
+                      border: `1.5px solid ${userLang===lang.code ? P.blue : P.border}`,
+                      background: userLang===lang.code ? P.blueBg : P.white,
+                      color: userLang===lang.code ? P.blue : P.slate,
+                      fontFamily:"Inter, system-ui, sans-serif",
+                    }}
+                    onClick={() => setUserLang(lang.code)}>
+                    {lang.label}
+                  </button>
+                ))}
+              </div>
+              {userLang !== "en-US" && (
+                <div style={{marginTop:8, fontSize:12, color:P.slate, background:P.blueBg, borderRadius:6, padding:"8px 12px"}}>
+                  Officer speech will be translated to {LANGUAGES.find(l=>l.code===userLang)?.label} and spoken aloud.
+                  Use the "Speak" button during the session to capture your voice in {LANGUAGES.find(l=>l.code===userLang)?.label}.
+                </div>
+              )}
+            </div>
+
             {error && <ErrBanner msg={error} />}
 
             <button style={{...s.primaryBtn, opacity:!stateCode||preparing?0.5:1}}
@@ -509,9 +810,12 @@ Thank you,
                 <div style={s.listenTitle}>
                   <span style={s.liveDot} className="pulse" />
                   <span style={{fontSize:15,fontWeight:600,color:P.navy}}>Listening Live</span>
-                  {isThinking && <span style={s.thinkingBadge}>analyzing…</span>}
+                  {(isThinking || translating) && <span style={s.thinkingBadge}>{translating?"translating…":"analyzing…"}</span>}
                 </div>
-                <div style={s.listenSub}>{sitInfo?.label} · {stateCode}</div>
+                <div style={s.listenSub}>
+                  {sitInfo?.label} · {stateCode}
+                  {userLang !== "en-US" && ` · ${LANGUAGES.find(l=>l.code===userLang)?.label}`}
+                </div>
               </div>
               <button style={s.stopBtn} onClick={stopListening}>Stop Session</button>
             </div>
@@ -522,8 +826,12 @@ Thank you,
               {suggestions.length === 0 ? (
                 <div style={s.emptyFeed}>
                   <div style={{fontSize:36,marginBottom:10}}>👂</div>
-                  <div style={{fontSize:14,color:P.slate,marginBottom:4}}>Listening for legally significant moments</div>
-                  <div style={{fontSize:12,color:P.slateL}}>Speak clearly near your device's microphone</div>
+                  <div style={{fontSize:14,color:P.slate,marginBottom:4}}>Monitoring conversation automatically</div>
+                  <div style={{fontSize:12,color:P.slateL}}>
+                    {userLang !== "en-US"
+                      ? `Officer's English is translated to ${LANGUAGES.find(l=>l.code===userLang)?.label} · Your ${LANGUAGES.find(l=>l.code===userLang)?.label} is analyzed in English`
+                      : "Legal hints will appear here when significant moments are detected"}
+                  </div>
                 </div>
               ) : suggestions.map(sug => <SugCard key={sug.id} s={sug} />)}
               <div ref={feedEndRef} />
@@ -531,19 +839,31 @@ Thank you,
 
             {transcript.length > 0 && (
               <div style={s.transcriptBox}>
-                <div style={s.transcriptLabel}>Transcript</div>
-                {transcript.slice(-4).map((t,i) => (
-                  <div key={i} style={s.transcriptLine}>
-                    <span style={s.transcriptTime}>{t.ts}</span>
-                    <span style={{color:P.slate}}>"{t.text}"</span>
-                  </div>
-                ))}
+                <div style={s.transcriptLabel}>Live Transcript</div>
+                {transcript.slice(-5).map((t,i) => {
+                  const sp = SPEAKER_META[t.speaker] || SPEAKER_META.officer;
+                  return (
+                    <div key={t.id||i} style={s.transcriptLine}>
+                      <span style={s.transcriptTime}>{t.ts}</span>
+                      <button
+                        onClick={() => t.id && flipSpeaker(t.id)}
+                        title="Click to flip speaker"
+                        style={{...s.speakerBadge, background: sp.bg, color: sp.color, border:"none", cursor: t.id?"pointer":"default"}}>
+                        {sp.label}
+                      </button>
+                      <span style={{color:P.slate, flex:1}}>
+                        &ldquo;{t.text}&rdquo;
+                        {t.originalText && <span style={{color:P.slateL, fontSize:11}}> ({t.originalText})</span>}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             )}
 
             {!supported && (
               <div style={{...s.errBanner, marginTop:12}}>
-                Speech recognition requires Chrome or Edge. Use a supported browser for live audio.
+                Microphone access is required. Please allow microphone permission and refresh the page.
               </div>
             )}
           </div>
@@ -606,6 +926,24 @@ Thank you,
                   : <span style={s.actionCta}>{reportReady?"Download Again →":"Generate PDF →"}</span>}
               </button>
 
+              {/* Download Recording */}
+              {audioUrl ? (
+                <a href={audioUrl} download={`lawaier-recording-${Date.now()}.webm`}
+                  style={{...s.actionCard, textDecoration:"none"}} className="actionCard">
+                  <span style={s.actionIcon}>🎙</span>
+                  <span style={s.actionTitle}>Download Recording</span>
+                  <span style={s.actionDesc}>Audio recording of the full encounter saved to your device</span>
+                  <span style={s.actionCta}>Save Audio →</span>
+                </a>
+              ) : (
+                <div style={{...s.actionCard, opacity:0.4, cursor:"default"}}>
+                  <span style={s.actionIcon}>🎙</span>
+                  <span style={s.actionTitle}>Recording</span>
+                  <span style={s.actionDesc}>Audio recording was not available (mic permission required)</span>
+                  <span style={s.actionCta}>Not available</span>
+                </div>
+              )}
+
               {/* Find Lawyer */}
               <button style={s.actionCard} className="actionCard"
                 onClick={() => { setShowLawyers(p=>!p); setActiveTab("lawyers"); }}>
@@ -623,6 +961,7 @@ Thank you,
             <div style={s.tabBar}>
               {[
                 { id:"suggestions", label:`Suggestions (${suggestions.length})` },
+                { id:"transcript",  label:`Transcript (${transcript.filter(t=>t.speaker!=="system").length})` },
                 { id:"document",    label:`Documents (${docFindings.length})` },
                 { id:"video",       label:"Video Analysis" },
                 { id:"lawyers",     label:"Lawyers" },
@@ -640,6 +979,41 @@ Thank you,
                 {suggestions.length===0
                   ? <div style={s.emptyTab}>No legally significant moments were detected during this session.</div>
                   : suggestions.map(sug => <SugCard key={sug.id} s={sug} showTrigger />)}
+              </div>
+            )}
+
+            {/* Tab: Full Transcript */}
+            {activeTab==="transcript" && (
+              <div>
+                {transcript.length === 0 ? (
+                  <div style={s.emptyTab}>No speech was captured during this session.</div>
+                ) : (
+                  <div style={s.fullTranscriptBox}>
+                    {transcript.map((t, i) => {
+                      const sp = SPEAKER_META[t.speaker] || SPEAKER_META.officer;
+                      return (
+                        <div key={t.id||i} style={{
+                          display:"flex", gap:12, padding:"10px 0",
+                          borderBottom: i < transcript.length-1 ? `1px solid ${P.border}` : "none",
+                          alignItems:"flex-start",
+                        }}>
+                          <span style={{color:P.slateL, fontSize:11, flexShrink:0, paddingTop:2}}>{t.ts}</span>
+                          <button
+                            onClick={() => t.id && flipSpeaker(t.id)}
+                            title="Click to flip speaker"
+                            style={{...s.speakerBadge, background:sp.bg, color:sp.color, flexShrink:0, border:"none", cursor: t.id?"pointer":"default"}}>
+                            {sp.label}
+                          </button>
+                          <span style={{color:P.navy, fontSize:14, lineHeight:1.5}}>
+                            {t.speaker === "system"
+                              ? <em style={{color:P.slate}}>{t.text}</em>
+                              : <>{`"${t.text}"`}{t.originalText && <span style={{color:P.slateL, fontSize:12, display:"block"}}>Original: {t.originalText}</span>}</>}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             )}
 
@@ -1041,8 +1415,10 @@ const s = {
   emptyFeed:    { textAlign:"center", padding:"48px 0", color:P.slateL },
   transcriptBox:{ background:P.white, border:`1px solid ${P.border}`, borderRadius:8, padding:"12px 14px", marginTop:8 },
   transcriptLabel:{ fontSize:10, fontWeight:600, color:P.slateL, letterSpacing:1, textTransform:"uppercase", marginBottom:8 },
-  transcriptLine: { display:"flex", gap:10, fontSize:12, marginBottom:4 },
-  transcriptTime: { color:P.slateL, flexShrink:0 },
+  transcriptLine: { display:"flex", gap:8, fontSize:12, marginBottom:6, alignItems:"flex-start" },
+  transcriptTime: { color:P.slateL, flexShrink:0, paddingTop:1 },
+  speakerBadge:   { fontSize:10, fontWeight:700, borderRadius:4, padding:"1px 6px", flexShrink:0, letterSpacing:0.3 },
+  fullTranscriptBox: { background:P.white, border:`1px solid ${P.border}`, borderRadius:8, padding:"4px 16px" },
   summaryBar:   { display:"flex", alignItems:"flex-start", justifyContent:"space-between", marginBottom:16 },
   summaryLeft:  {},
   summaryTitle: { fontSize:18, fontWeight:700, color:P.navy },

@@ -1,29 +1,36 @@
 """
-AI Law Coach - FastAPI Backend v2
+LawAIer - FastAPI Backend v2
 ===================================
 New in v2:
   POST /analyze-document  — Vision reads warrants, tickets, IDs
   POST /generate-report   — post-encounter legal PDF report
 
-PRE-HACKATHON: Uses Anthropic Claude API (no special access needed)
-HACKATHON DAY: Swap commented blocks to Gemini (marked HACKATHON_DAY)
+Uses Google Gemini via Vertex AI (google-genai SDK)
 
-Run:
+Run locally:
     uvicorn main:app --reload --port 8000
+Deploy:
+    gcloud builds submit --config ../cloudbuild.yaml .
 """
 
-import os, json, base64, io
+import os, json, base64, io, asyncio, logging
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Optional
 
-import httpx
-from fastapi import FastAPI, HTTPException
+import chromadb
+from chromadb import EmbeddingFunction, Documents
+
+from google import genai
+from google.genai import types
+
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-import chromadb
-from chromadb.utils import embedding_functions
+log = logging.getLogger("lawaier")
 
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle
@@ -35,35 +42,53 @@ from reportlab.platypus import (
 )
 from reportlab.lib.enums import TA_RIGHT
 
-# HACKATHON_DAY: uncomment ↓
-# from google import genai
-# from google.genai import types
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Build the ChromaDB vector store at startup so the first request is fast."""
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _build_vector_store)
+    yield
 
-app = FastAPI(title="AI Law Coach API", version="2.0.0")
+app = FastAPI(title="LawAIer API", version="2.0.0", lifespan=lifespan)
+_CORS_ORIGINS = ["http://localhost:3000", "http://localhost:5173"]
+_frontend_url = os.environ.get("FRONTEND_URL", "")
+if _frontend_url:
+    _CORS_ORIGINS.append(_frontend_url)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173"],
+    allow_origins=_CORS_ORIGINS,
+    allow_origin_regex=r"https://.*\.run\.app",   # allow any Cloud Run URL
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # ── CONFIG ────────────────────────────────────────────────────────────────
-DB_PATH           = "./law_coach_db"
-COLLECTION_NAME   = "laws"
-EMBEDDING_MODEL   = "all-MiniLM-L6-v2"
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-# HACKATHON_DAY: GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = "gemini-2.0-flash"
 
-# ── ChromaDB ──────────────────────────────────────────────────────────────
-_collection = None
+PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+LOCATION   = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
 
-def get_collection():
-    global _collection
-    if _collection is None:
-        client = chromadb.PersistentClient(path=DB_PATH)
-        ef = embedding_functions.SentenceTransformerEmbeddingFunction(model_name=EMBEDDING_MODEL)
-        _collection = client.get_collection(COLLECTION_NAME, embedding_function=ef)
-    return _collection
+# Vertex AI client — lazy-initialized so ADC credentials are resolved at call time
+_genai_client: genai.Client | None = None
+
+def get_client() -> genai.Client:
+    global _genai_client
+    if _genai_client is None:
+        project = os.environ.get("GOOGLE_CLOUD_PROJECT", PROJECT_ID)
+        location = os.environ.get("GOOGLE_CLOUD_LOCATION", LOCATION)
+        _genai_client = genai.Client(vertexai=True, project=project, location=location)
+    return _genai_client
+
+# ── Laws DB (loaded once) ─────────────────────────────────────────────────
+_laws_cache: list[dict] = []
+
+def get_laws() -> list[dict]:
+    global _laws_cache
+    if not _laws_cache:
+        with open("laws_data.json") as f:
+            _laws_cache = json.load(f)
+    return _laws_cache
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────
@@ -78,6 +103,7 @@ class AnalyzeRequest(BaseModel):
     state: str
     description: str
     conversation_history: list[dict] = []
+    user_lang: str = "en"          # e.g. "hi", "es", "fr" — "en" means English only session
 
 class DocumentAnalysisRequest(BaseModel):
     image_base64: str
@@ -95,119 +121,183 @@ class ReportRequest(BaseModel):
     doc_findings: list[dict] = []
     duration_seconds: int = 0
 
+class TranslateRequest(BaseModel):
+    text: str
+    target_lang: str  # e.g. "Spanish", "French"
 
-# ── RAG ───────────────────────────────────────────────────────────────────
+class TranscribeAnalyzeRequest(BaseModel):
+    audio_base64: str          # raw audio chunk as base64
+    media_type:   str          # "audio/webm", "audio/ogg", etc.
+    situation:    str
+    state:        str
+    description:  str
+    conversation_history: list[dict] = []
+    user_lang:    str = "en"   # BCP-47 lang code prefix e.g. "hi", "es"
+
+
+# ── Vector DB (ChromaDB + Vertex AI text-embedding-004) ───────────────────
+
+class _VertexEmbedFn(EmbeddingFunction):
+    """Synchronous embedding function that calls Vertex AI text-embedding-004."""
+    def __call__(self, input: Documents):   # type: ignore[override]
+        resp = get_client().models.embed_content(
+            model="text-embedding-004",
+            contents=list(input),
+        )
+        return [e.values for e in resp.embeddings]
+
+_chroma_collection = None
+
+def _build_vector_store():
+    """Build (or return cached) in-memory ChromaDB collection from laws_data.json."""
+    global _chroma_collection
+    if _chroma_collection is not None:
+        return _chroma_collection
+
+    laws = get_laws()
+    client = chromadb.Client()          # in-memory, no disk required
+    col = client.get_or_create_collection(
+        name="lawaier_laws",
+        embedding_function=_VertexEmbedFn(),
+        metadata={"hnsw:space": "cosine"},
+    )
+
+    # Embed document text = title + content for richer semantic signal
+    col.add(
+        ids=[l["id"] for l in laws],
+        documents=[f"{l['title']}. {l['content']}" for l in laws],
+        metadatas=[{
+            "state":               l["state"],
+            "situation":           l["situation"],
+            "urgency":             l["urgency"],
+            "title":               l["title"],
+            "law_reference":       l["law_reference"],
+            "actionable_response": l["actionable_response"],
+            "keywords":            ",".join(l.get("keywords", [])),
+        } for l in laws],
+    )
+
+    _chroma_collection = col
+    log.info("ChromaDB vector store built — %d law chunks indexed.", len(laws))
+    return col
+
+
 def query_laws(query: str, state: str, situation: str, n: int = 5) -> list[dict]:
+    """
+    Semantic search over laws_data.json via ChromaDB + Vertex AI text-embedding-004.
+    Falls back to keyword scoring if the vector store is unavailable.
+    """
     try:
-        col = get_collection()
-        where = {
-            "$or": [
-                {"$and": [{"state": {"$eq": state}},     {"situation": {"$eq": situation}}]},
-                {"$and": [{"state": {"$eq": "federal"}}, {"situation": {"$eq": situation}}]},
-                {"state": {"$eq": "federal"}},
-            ]
-        }
-        res = col.query(query_texts=[query], n_results=min(n, col.count()),
-                        where=where, include=["documents","metadatas","distances"])
-        return [{
-            "id":                  res["ids"][0][i],
-            "title":               res["metadatas"][0][i]["title"],
-            "law_reference":       res["metadatas"][0][i]["law_reference"],
-            "actionable_response": res["metadatas"][0][i]["actionable_response"],
-            "urgency":             res["metadatas"][0][i]["urgency"],
-            "state":               res["metadatas"][0][i]["state"],
-            "situation":           res["metadatas"][0][i]["situation"],
-            "relevance_score":     round(1 - res["distances"][0][i], 3),
-        } for i in range(len(res["ids"][0]))]
-    except Exception as e:
-        print(f"[RAG ERROR] {e}")
-        return _fallback(query, state, situation, n)
+        col = _build_vector_store()
+        search_text = query.strip() or f"{situation.replace('_', ' ')} legal rights"
 
-def _fallback(query: str, state: str, situation: str, n: int) -> list[dict]:
-    with open("laws_data.json") as f:
-        laws = json.load(f)
+        results = col.query(
+            query_texts=[search_text],
+            n_results=min(n * 3, col.count()),
+            where={"$and": [
+                {"situation": {"$eq": situation}},
+                {"state":     {"$in": [state, "federal"]}},
+            ]},
+        )
+
+        laws_by_id = {l["id"]: l for l in get_laws()}
+        return [laws_by_id[lid] for lid in results["ids"][0] if lid in laws_by_id][:n]
+
+    except Exception as exc:
+        log.warning("Vector search failed (%s) — falling back to keyword search.", exc)
+        return _query_laws_keyword(query, state, situation, n)
+
+
+def _query_laws_keyword(query: str, state: str, situation: str, n: int = 5) -> list[dict]:
+    """Keyword fallback: TF-style scoring over laws_data.json."""
+    laws = get_laws()
     q = query.lower()
     scored = []
     for law in laws:
         if law["situation"] != situation: continue
         if law["state"] not in (state, "federal"): continue
-        score = sum(2 for kw in law["keywords"] if kw.lower() in q)
+        score = sum(2 for kw in law.get("keywords", []) if kw.lower() in q)
         score += 1 if law["state"] == state else 0
-        scored.append({**law, "relevance_score": round(score/10, 2)})
+        scored.append({**law, "relevance_score": round(score / 10, 2)})
     scored.sort(key=lambda x: x["relevance_score"], reverse=True)
     return scored[:n]
 
-def build_system_prompt(laws, situation, state, description):
+def build_system_prompt(laws, situation, state, description, user_lang: str = "en"):
     law_block = "\n\n".join([
         f"[LAW {i+1}] {l['title']}\nRef: {l['law_reference']}\n"
         f"Urgency: {l['urgency'].upper()}\nAdvise: {l['actionable_response']}"
         for i, l in enumerate(laws)
     ])
+
+    lang_rules = ""
+    if user_lang and user_lang != "en":
+        lang_rules = f"""
+MULTILINGUAL SESSION: The detained person speaks {user_lang}. Two speakers will be heard:
+- OFFICER: speaks English (commands, asks for ID, states charges, "step out", "do you know why I stopped you", etc.)
+- USER (detained person): speaks {user_lang}
+
+Detection rules:
+1. If the text is in English → speaker is "officer"
+2. If the text is in {user_lang} → speaker is "you"
+3. If mixed / unclear → use content to decide (authority/commands = officer, rights/responses = you)
+
+Also provide "english_text": if the user spoke in {user_lang}, translate their words to English here.
+If the officer spoke in English, set "english_text" to "".
+"""
+
     return f"""You are a real-time AI legal rights coach.
 SITUATION: {situation.replace('_',' ').title()} | STATE: {state}
 CONTEXT: {description}
 
 LAWS:
 {law_block}
-
+{lang_rules}
 Output ONLY valid JSON — no markdown, no extra text:
-{{"urgency":"red|yellow|green","suggestion":"1 sentence max","law":"law name"}}
-Nothing significant → {{"urgency":"green","suggestion":"","law":""}}"""
+{{"urgency":"red|yellow|green","suggestion":"1 sentence max","law":"law name","speaker":"officer|you","english_text":""}}
+Nothing significant → {{"urgency":"green","suggestion":"","law":"","speaker":"officer","english_text":""}}"""
 
 
-# ── Unified AI caller ─────────────────────────────────────────────────────
+# ── Unified AI caller (Gemini / Vertex AI) ────────────────────────────────
 async def call_ai(system: str, messages: list[dict], max_tokens: int = 1000,
                   image_base64: str = None, media_type: str = None) -> str:
     """
-    PRE-HACKATHON: Anthropic Claude (text + vision)
-    HACKATHON_DAY: replace with google-genai SDK (see comments)
+    Calls Gemini via Vertex AI using google-genai SDK.
+    Matches the pattern used across all way-back-home solutions.
     """
-    msg_list = list(messages)
+    # Build the user text from the last message
+    last_msg = messages[-1] if messages else {}
+    user_text = last_msg.get("content", "") if isinstance(last_msg.get("content"), str) else ""
+
+    config = types.GenerateContentConfig(
+        system_instruction=system,
+        max_output_tokens=max_tokens,
+    )
 
     if image_base64 and media_type:
-        last = msg_list[-1]
-        last_text = last["content"] if isinstance(last["content"], str) else ""
-        msg_list[-1] = {
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_base64}},
-                {"type": "text",  "text": last_text}
-            ]
-        }
-
-    # ── PRE-HACKATHON ─────────────────────────────────────────────────────
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01",
-                     "content-type": "application/json"},
-            json={"model": "claude-haiku-4-5-20251001", "max_tokens": max_tokens,
-                  "system": system, "messages": msg_list}
+        # Vision call — image/video bytes + text prompt
+        image_part = types.Part.from_bytes(
+            data=base64.b64decode(image_base64),
+            mime_type=media_type,
         )
-        data = r.json()
-        if "error" in data:
-            raise HTTPException(500, detail=str(data["error"]))
-        return data["content"][0]["text"] if data.get("content") else ""
-    # ── END PRE-HACKATHON ─────────────────────────────────────────────────
+        text_part = types.Part.from_text(text=user_text or "Analyze this document.")
+        contents = [types.Content(role="user", parts=[image_part, text_part])]
+    else:
+        # Text-only call — include conversation history
+        contents = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            text = msg.get("content", "")
+            if isinstance(text, str):
+                contents.append(
+                    types.Content(role=role, parts=[types.Part.from_text(text=text)])
+                )
 
-    # HACKATHON_DAY — TEXT:
-    # client = genai.Client(api_key=GEMINI_API_KEY)
-    # response = client.models.generate_content(
-    #     model="gemini-2.0-flash",
-    #     contents=msg_list[-1]["content"] if isinstance(msg_list[-1]["content"], str) else msg_list[-1]["content"][-1]["text"],
-    #     config=types.GenerateContentConfig(system_instruction=system, max_output_tokens=max_tokens)
-    # )
-    # return response.text
-
-    # HACKATHON_DAY — VISION:
-    # image_part = types.Part.from_bytes(data=base64.b64decode(image_base64), mime_type=media_type)
-    # text_part  = types.Part.from_text(msg_list[-1]["content"] if isinstance(msg_list[-1]["content"],str) else "Analyze this document.")
-    # response = client.models.generate_content(
-    #     model="gemini-2.0-flash",
-    #     contents=[image_part, text_part],
-    #     config=types.GenerateContentConfig(system_instruction=system, max_output_tokens=max_tokens)
-    # )
-    # return response.text
+    response = await get_client().aio.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=contents,
+        config=config,
+    )
+    return response.text or ""
 
 
 def _parse_json(raw: str, fallback: dict) -> dict:
@@ -319,21 +409,202 @@ def health():
     return {"status": "ok", "version": "2.0.0"}
 
 
+# ── WebSocket session endpoint ────────────────────────────────────────────────
+async def _do_transcribe_analyze(audio_base64: str, media_type: str, ctx: dict) -> dict:
+    """Core transcription + analysis logic shared by HTTP and WebSocket endpoints."""
+    laws = query_laws("", ctx["state"], ctx["situation"], n=5)
+    law_block = "\n\n".join([
+        f"[LAW {i+1}] {l['title']}\nRef: {l['law_reference']}\n"
+        f"Urgency: {l['urgency'].upper()}\nAdvise: {l['actionable_response']}"
+        for i, l in enumerate(laws)
+    ])
+
+    multilingual = ctx["user_lang"] and ctx["user_lang"] != "en"
+    lang_note = ""
+    if multilingual:
+        lang_note = f"""
+MULTILINGUAL: The detained person speaks {ctx['user_lang']}.
+- Officer speaks ENGLISH → set speaker="officer". Also put the officer's words translated to {ctx['user_lang']} in "translated_for_user".
+- Detained person speaks {ctx['user_lang']} → set speaker="you". Put their words translated to English in "english_text".
+"""
+
+    system = f"""You are a real-time AI legal rights coach monitoring a live {ctx['situation'].replace('_',' ')} encounter in {ctx['state']}.
+
+Listen to the audio chunk carefully.
+{lang_note}
+LAWS TO REFERENCE:
+{law_block}
+
+Rules:
+- "officer" = commanding, authoritative, requests for ID/documents, stating charges, asking to step out
+- "you" = detained person responding, asking about rights, quieter/more hesitant
+- If the audio is silent, unclear, or background noise only → return transcribed="" and speaker=""
+- Coaching suggestion must be actionable, max 1 sentence
+
+Output ONLY valid JSON, no markdown:
+{{"transcribed":"what was said verbatim","speaker":"officer|you|","english_text":"","translated_for_user":"","urgency":"red|yellow|green","suggestion":"","law":""}}"""
+
+    msgs = [{"role": "user", "content": "Transcribe and analyze this audio."}]
+    raw = await call_ai(system, msgs, max_tokens=400,
+                        image_base64=audio_base64, media_type=media_type)
+    return _parse_json(raw, {
+        "transcribed": "", "speaker": "", "english_text": "",
+        "translated_for_user": "", "urgency": "green", "suggestion": "", "law": "",
+    })
+
+
+@app.websocket("/ws/session")
+async def ws_session(websocket: WebSocket):
+    """
+    Persistent WebSocket for real-time audio analysis.
+    Eliminates per-chunk HTTP overhead and chunking issues during translation.
+
+    Message protocol (client → server):
+      { "type": "init", "situation": "...", "state": "...", "description": "...", "user_lang": "en" }
+      { "type": "audio", "data": "<base64>", "media_type": "audio/webm" }
+      { "type": "translate", "text": "...", "target_lang": "Spanish" }
+
+    Message protocol (server → client):
+      { "type": "ready" }
+      { "type": "analysis", "transcribed": "...", "speaker": "...", ... }
+      { "type": "translation", "translated": "..." }
+      { "type": "error", "message": "..." }
+    """
+    await websocket.accept()
+
+    # Session context — populated by "init" message
+    ctx = {"situation": "", "state": "", "description": "", "user_lang": "en"}
+
+    try:
+        while True:
+            text = await websocket.receive_text()
+            msg = json.loads(text)
+            msg_type = msg.get("type")
+
+            if msg_type == "init":
+                ctx = {
+                    "situation":   msg.get("situation", ""),
+                    "state":       msg.get("state", ""),
+                    "description": msg.get("description", ""),
+                    "user_lang":   msg.get("user_lang", "en"),
+                }
+                await websocket.send_text(json.dumps({"type": "ready"}))
+
+            elif msg_type == "audio":
+                result = await _do_transcribe_analyze(
+                    audio_base64=msg.get("data", ""),
+                    media_type=msg.get("media_type", "audio/webm"),
+                    ctx=ctx,
+                )
+                await websocket.send_text(json.dumps({"type": "analysis", **result}))
+
+            elif msg_type == "translate":
+                system = (
+                    f"You are a precise, literal translator. "
+                    f"Translate the following text to {msg.get('target_lang', 'English')}. "
+                    f"Output ONLY the translated text — no explanations, no quotes."
+                )
+                msgs = [{"role": "user", "content": msg.get("text", "")}]
+                result = await call_ai(system, msgs, max_tokens=400)
+                await websocket.send_text(json.dumps({"type": "translation", "translated": result.strip()}))
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        try:
+            await websocket.send_text(json.dumps({"type": "error", "message": str(e)}))
+        except Exception:
+            pass
+
+
 @app.post("/prepare")
 def prepare(req: PrepareRequest):
     laws = query_laws(req.description, req.state, req.situation)
     return {"laws": laws}
 
 
+@app.post("/translate")
+async def translate_text(req: TranslateRequest):
+    """Translate text to target language using Gemini."""
+    system = (
+        f"You are a precise, literal translator. "
+        f"Translate the following text to {req.target_lang}. "
+        f"Output ONLY the translated text — no explanations, no quotes."
+    )
+    msgs = [{"role": "user", "content": req.text}]
+    result = await call_ai(system, msgs, max_tokens=400)
+    return {"translated": result.strip()}
+
+
+@app.post("/transcribe-analyze")
+async def transcribe_analyze(req: TranscribeAnalyzeRequest):
+    """
+    Gemini listens to an audio chunk and in ONE call:
+      1. Transcribes what was said
+      2. Detects speaker (officer vs user) from tone + content + language
+      3. Translates if multilingual session
+      4. Gives legal coaching hint
+    Replaces Web Speech API — works in any browser, handles multilingual natively.
+    """
+    laws = query_laws("", req.state, req.situation, n=5)
+    law_block = "\n\n".join([
+        f"[LAW {i+1}] {l['title']}\nRef: {l['law_reference']}\n"
+        f"Urgency: {l['urgency'].upper()}\nAdvise: {l['actionable_response']}"
+        for i, l in enumerate(laws)
+    ])
+
+    multilingual = req.user_lang and req.user_lang != "en"
+    lang_note = ""
+    if multilingual:
+        lang_note = f"""
+MULTILINGUAL: The detained person speaks {req.user_lang}.
+- Officer speaks ENGLISH → set speaker="officer". Also put the officer's words translated to {req.user_lang} in "translated_for_user".
+- Detained person speaks {req.user_lang} → set speaker="you". Put their words translated to English in "english_text".
+"""
+
+    system = f"""You are a real-time AI legal rights coach monitoring a live {req.situation.replace('_',' ')} encounter in {req.state}.
+
+Listen to the audio chunk carefully.
+{lang_note}
+LAWS TO REFERENCE:
+{law_block}
+
+Rules:
+- "officer" = commanding, authoritative, requests for ID/documents, stating charges, asking to step out
+- "you" = detained person responding, asking about rights, quieter/more hesitant
+- If the audio is silent, unclear, or background noise only → return transcribed="" and speaker=""
+- Coaching suggestion must be actionable, max 1 sentence
+
+Output ONLY valid JSON, no markdown:
+{{"transcribed":"what was said verbatim","speaker":"officer|you|","english_text":"","translated_for_user":"","urgency":"red|yellow|green","suggestion":"","law":""}}"""
+
+    msgs = [{"role": "user", "content": "Transcribe and analyze this audio."}]
+    raw = await call_ai(system, msgs, max_tokens=400,
+                        image_base64=req.audio_base64, media_type=req.media_type)
+    result = _parse_json(raw, {
+        "transcribed": "", "speaker": "", "english_text": "",
+        "translated_for_user": "", "urgency": "green", "suggestion": "", "law": "",
+    })
+    return result
+
+
 @app.post("/analyze")
 async def analyze(req: AnalyzeRequest):
-    laws    = query_laws(req.spoken_text, req.state, req.situation)
-    system  = build_system_prompt(laws, req.situation, req.state, req.description)
-    msgs    = req.conversation_history + [{"role":"user","content": f'They said: "{req.spoken_text}". JSON only.'}]
-    raw     = await call_ai(system, msgs, max_tokens=200)
-    result  = _parse_json(raw, {"urgency":"green","suggestion":"","law":""})
-    return {"urgency": result.get("urgency","green"), "suggestion": result.get("suggestion",""),
-            "law": result.get("law",""), "laws_used": [l["title"] for l in laws[:2]]}
+    # Use english_text for law search if user spoke in another language
+    search_text = req.spoken_text
+    laws   = query_laws(search_text, req.state, req.situation)
+    system = build_system_prompt(laws, req.situation, req.state, req.description, req.user_lang)
+    msgs   = req.conversation_history + [{"role":"user","content": f'Spoken: "{req.spoken_text}". JSON only.'}]
+    raw    = await call_ai(system, msgs, max_tokens=300)
+    result = _parse_json(raw, {"urgency":"green","suggestion":"","law":"","speaker":"officer","english_text":""})
+    return {
+        "urgency":      result.get("urgency", "green"),
+        "suggestion":   result.get("suggestion", ""),
+        "law":          result.get("law", ""),
+        "speaker":      result.get("speaker", "officer"),
+        "english_text": result.get("english_text", ""),
+        "laws_used":    [l["title"] for l in laws[:2]],
+    }
 
 
 # ── Vision Document Analysis + Points Calculator ─────────────────────────
@@ -503,7 +774,7 @@ Write the report JSON."""}]
         content=pdf_bytes,
         media_type="application/pdf",
         headers={"Content-Disposition":
-            f'attachment; filename="law-coach-{datetime.now().strftime("%Y%m%d-%H%M")}.pdf"'}
+            f'attachment; filename="lawaier-{datetime.now().strftime("%Y%m%d-%H%M")}.pdf"'}
     )
 
 
@@ -544,7 +815,7 @@ def _build_pdf(req: ReportRequest, assessment: dict) -> bytes:
 
     # Header
     ht = Table([[
-        Paragraph("⚖ LAW COACH AI", HEADER),
+        Paragraph("⚖ LAWAIER AI", HEADER),
         Paragraph(f'<font color="#{rc.hexval()[2:]}">● {risk.upper()} RISK</font>',
                   S("r", fontSize=13, fontName="Helvetica-Bold", textColor=rc, alignment=TA_RIGHT))
     ]], colWidths=[4.5*inch, 2.5*inch])
@@ -654,9 +925,9 @@ def _build_pdf(req: ReportRequest, assessment: dict) -> bytes:
                 f'<font color="#9ca3af">[{t.get("ts","")}]</font>  "{t.get("text","")}"', SMALL))
 
     story += [Spacer(1,14), HRFlowable(width="100%",thickness=0.5,color=MGRAY,spaceAfter=5),
-              Paragraph(f"LEGAL DISCLAIMER: This report is generated by AI Law Coach for informational purposes only. "
+              Paragraph(f"LEGAL DISCLAIMER: This report is generated by LawAIer for informational purposes only. "
                         f"It does not constitute legal advice. Always consult a licensed attorney. "
-                        f"Generated: {now.strftime('%B %d, %Y at %I:%M %p')} | AI Law Coach v2.0", DISCLAIM)]
+                        f"Generated: {now.strftime('%B %d, %Y at %I:%M %p')} | LawAIer v2.0", DISCLAIM)]
 
     doc.build(story)
     return buf.getvalue()
@@ -684,7 +955,7 @@ async def analyze_video(req: VideoAnalysisRequest):
       - Recommended actions
 
     PRE-HACKATHON: Claude vision (supports video via base64)
-    HACKATHON_DAY: Gemini Flash — native video understanding, better timestamps
+    Gemini natively handles video — full native video understanding with timestamps
     """
     laws    = query_laws(req.description, req.state, req.situation)
     law_ctx = "\n".join([f"- {l['title']}: {l['actionable_response']}" for l in laws])
@@ -741,8 +1012,7 @@ Respond ONLY with this JSON (no markdown):
 
     msgs = [{"role":"user","content":"Please analyze this video footage of the encounter."}]
 
-    # For video, we send as image type since Claude handles video frames
-    # HACKATHON_DAY: Gemini natively handles video — just pass video/mp4 directly
+    # Gemini natively handles video/mp4 — pass base64 bytes with correct mime_type
     raw = await call_ai(system, msgs, max_tokens=1500,
                         image_base64=req.video_base64, media_type=req.media_type)
 
@@ -766,3 +1036,14 @@ def list_laws(state: Optional[str] = None, situation: Optional[str] = None):
     if state:     laws = [l for l in laws if l["state"] in (state,"federal")]
     if situation: laws = [l for l in laws if l["situation"] == situation]
     return {"count": len(laws), "laws": laws}
+
+
+# ── Serve React frontend (local dev + single-port deployment) ─────────────────
+_FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "frontend", "dist")
+
+if os.path.isdir(_FRONTEND_DIST):
+    app.mount("/assets", StaticFiles(directory=os.path.join(_FRONTEND_DIST, "assets")), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def serve_frontend(full_path: str):
+        return FileResponse(os.path.join(_FRONTEND_DIST, "index.html"))
