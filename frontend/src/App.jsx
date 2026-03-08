@@ -238,21 +238,42 @@ function useRecorder() {
 
 // ─── Speech hook ───────────────────────────────────────────────────────────
 function useSpeech(onResult, lang = "en-US") {
-  const ref = useRef(null);
+  const ref        = useRef(null);
+  const onResultRef = useRef(onResult);
+  const activeRef  = useRef(false);          // track whether we WANT it running
   const [listening, setListening] = useState(false);
   const [supported, setSupported] = useState(true);
+
+  // Keep callback ref fresh without ever rebuilding the recognizer
+  useEffect(() => { onResultRef.current = onResult; }, [onResult]);
+
+  // Only rebuild recognizer when the language changes (not on every handleSpeech recreate)
   useEffect(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) { setSupported(false); return; }
     const r = new SR();
-    r.continuous = true; r.interimResults = false; r.lang = lang;
-    r.onresult = e => { const t = e.results[e.results.length-1][0].transcript.trim(); if(t) onResult(t); };
-    r.onerror  = () => {};
-    r.onend    = () => setListening(false);
+    r.continuous     = true;
+    r.interimResults = false;
+    r.lang           = lang;
+    r.onresult = e => {
+      const t = e.results[e.results.length - 1][0].transcript.trim();
+      if (t) onResultRef.current(t);
+    };
+    r.onerror = () => {};
+    // Auto-restart: Chrome stops the recognizer after silences even with continuous=true
+    r.onend = () => {
+      if (activeRef.current) {
+        try { r.start(); } catch { /* already started */ }
+      } else {
+        setListening(false);
+      }
+    };
     ref.current = r;
-  }, [onResult, lang]);
-  const start = useCallback(() => { ref.current?.start(); setListening(true); }, []);
-  const stop  = useCallback(() => { ref.current?.stop();  setListening(false); }, []);
+    return () => { activeRef.current = false; try { r.stop(); } catch {} };
+  }, [lang]);                                // ← only lang, NOT onResult
+
+  const start = useCallback(() => { activeRef.current = true;  ref.current?.start(); setListening(true);  }, []);
+  const stop  = useCallback(() => { activeRef.current = false; ref.current?.stop();  setListening(false); }, []);
   return { listening, supported, start, stop };
 }
 
@@ -314,6 +335,12 @@ export default function App() {
   const [sessions,       setSessions]       = useState(loadSessions);
   const [showSessions,   setShowSessions]   = useState(false);
 
+  // Use refs for values that change frequently — keeps handleSpeech stable
+  const historyRef    = useRef([]);
+  const isThinkingRef = useRef(false);
+  useEffect(() => { historyRef.current = history; },    [history]);
+  useEffect(() => { isThinkingRef.current = isThinking; }, [isThinking]);
+
   const feedEndRef = useRef(null);
   useEffect(() => { feedEndRef.current?.scrollIntoView({ behavior:"smooth" }); }, [suggestions]);
   useEffect(() => {
@@ -321,10 +348,12 @@ export default function App() {
   }, []);
 
   // ── Speech — fully automatic, no user input required ─────────────────────
+  // Uses refs for history/isThinking so this callback stays stable and never
+  // triggers useSpeech to rebuild the recognizer mid-session.
   const handleSpeech = useCallback(async (text) => {
-    if (isThinking) return;
-    const ts      = new Date().toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
-    const langInfo = LANGUAGES.find(l => l.code === userLang) || LANGUAGES[0];
+    if (isThinkingRef.current) return;
+    const ts           = new Date().toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+    const langInfo     = LANGUAGES.find(l => l.code === userLang) || LANGUAGES[0];
     const multilingual = userLang !== "en-US";
     const userLangCode = userLang.split("-")[0]; // "hi-IN" → "hi"
 
@@ -335,11 +364,14 @@ export default function App() {
     try {
       // Single Gemini call: detects language, classifies speaker, translates user speech,
       // and gives legal coaching — all in one round-trip
-      const res = await apiAnalyze(text, situation, stateCode, description, history, multilingual ? userLangCode : "en");
+      const res = await apiAnalyze(
+        text, situation, stateCode, description,
+        historyRef.current,                          // ← read from ref, not closure
+        multilingual ? userLangCode : "en",
+      );
       const speaker     = res.speaker || "officer";
-      const englishText = res.english_text || "";  // set when user spoke in their language
+      const englishText = res.english_text || "";
 
-      // Build transcript entry
       let displayText  = text;
       let originalText = null;
 
@@ -350,30 +382,32 @@ export default function App() {
           const tr = await apiTranslate(text, langInfo.gemini);
           if (tr.translated) {
             displayText  = tr.translated;
-            originalText = text;            // keep original for reference
-            // Speak translated officer speech aloud in user's language
+            originalText = text;
             if (window.speechSynthesis) {
               const utt = new SpeechSynthesisUtterance(tr.translated);
               utt.lang = userLang; utt.rate = 0.9;
               window.speechSynthesis.speak(utt);
             }
           }
-        } catch { /* display original if translation fails */ }
+        } catch { /* use original on failure */ }
         setTranslating(false);
       } else if (multilingual && speaker === "you" && englishText) {
-        // User spoke in their language — show their words, note English translation
-        originalText = englishText;         // English translation shown as subtext
+        originalText = englishText; // show English translation as subtext
       }
 
       setTranscript(p => [...p, { text: displayText, originalText, ts, speaker, id: Date.now() + Math.random() }]);
 
-      // Update history using English text for accurate legal analysis
+      // Append to history using English text so legal analysis stays accurate
       const historyText = (multilingual && speaker === "you" && englishText) ? englishText : text;
-      const h2 = [...history, { role:"user", content:`Spoken: "${historyText}"` }];
-      setHistory(h2);
+      setHistory(p => {
+        const h2 = [...p, { role:"user", content:`Spoken: "${historyText}"` }];
+        if (res.suggestion) {
+          return [...h2, { role:"assistant", content:JSON.stringify(res) }];
+        }
+        return h2;
+      });
 
       if (res.suggestion) {
-        setHistory(p => [...p, { role:"assistant", content:JSON.stringify(res) }]);
         setSuggestions(p => [...p, { ...res, id:Date.now(), time:ts, trigger:displayText }]);
       }
     } catch {
@@ -382,7 +416,8 @@ export default function App() {
     }
     setIsThinking(false);
     setTranslating(false);
-  }, [situation, stateCode, description, history, isThinking, userLang]);
+  }, [situation, stateCode, description, userLang]);
+  // ↑ history and isThinking intentionally omitted — accessed via refs above
 
   // Run recognizer in user's language — Chrome handles bilingual sessions natively
   // Gemini detects which language was spoken and classifies speaker accordingly
