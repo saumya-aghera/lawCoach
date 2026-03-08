@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 // ─── Palette ───────────────────────────────────────────────────────────────
 // Single blue palette: navy text, slate grays, white backgrounds, blue accents
@@ -356,7 +356,7 @@ export default function App() {
       });
       const url  = URL.createObjectURL(blob);
       const link = document.createElement("a");
-      link.href = url; link.download = `law-coach-report-${Date.now()}.pdf`;
+      link.href = url; link.download = `lawaier-report-${Date.now()}.pdf`;
       link.click(); URL.revokeObjectURL(url);
       setReportReady(true);
     } catch { setError("Report generation failed — check backend is running."); }
@@ -374,7 +374,7 @@ I am seeking legal representation regarding a recent ${sit} encounter in ${state
 
 Summary: ${description || "Please see attached incident report."}
 
-I have attached a detailed AI Law Coach incident report which includes the full encounter timeline, rights invoked, AI coaching suggestions provided, and any evidence analyzed.
+I have attached a detailed AI LawAIer incident report which includes the full encounter timeline, rights invoked, AI coaching suggestions provided, and any evidence analyzed.
 
 I would greatly appreciate the opportunity to discuss my case.
 
@@ -394,7 +394,7 @@ Thank you,
       {/* ── HEADER ── */}
       <header style={s.header}>
         <div style={s.headerLeft}>
-          <span style={s.headerLogo}>⚖ Law Coach</span>
+          <span style={s.headerLogo}>⚖ LawAIer</span>
           {situation && stateCode && screen !== "s1_situation" && screen !== "s2_state" && (
             <span style={s.headerPill}>{sitInfo?.label} · {stateCode}</span>
           )}

@@ -1,5 +1,5 @@
 """
-AI Law Coach - ChromaDB Builder
+AI LawAIer - ChromaDB Builder
 ================================
 Run this ONCE before the hackathon to build the vector database.
 
@@ -9,7 +9,7 @@ Setup:
 Usage:
     python build_chromadb.py
 
-This will create a ./law_coach_db folder with the ChromaDB persistent store.
+This will create a ./lawaier_db folder with the ChromaDB persistent store.
 """
 
 import json
@@ -21,7 +21,7 @@ from chromadb.utils import embedding_functions
 # CONFIG
 # ──────────────────────────────────────────────
 LAWS_FILE = "laws_data.json"
-DB_PATH = "./law_coach_db"
+DB_PATH = "./lawaier_db"
 COLLECTION_NAME = "laws"
 
 # Using a local sentence-transformer model — no API key needed
@@ -30,7 +30,7 @@ EMBEDDING_MODEL = "all-MiniLM-L6-v2"  # Fast, accurate, runs locally
 
 def build_db():
     print("=" * 50)
-    print("  AI Law Coach - ChromaDB Builder")
+    print("  AI LawAIer - ChromaDB Builder")
     print("=" * 50)
 
     # ── Load laws data ──────────────────────────

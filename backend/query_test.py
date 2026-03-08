@@ -1,5 +1,5 @@
 """
-AI Law Coach - RAG Query Tester
+AI LawAIer - RAG Query Tester
 ================================
 Run this AFTER build_chromadb.py to verify the pipeline works.
 
@@ -12,7 +12,7 @@ Tests real queries to make sure retrieval is accurate.
 import chromadb
 from chromadb.utils import embedding_functions
 
-DB_PATH = "./law_coach_db"
+DB_PATH = "./lawaier_db"
 COLLECTION_NAME = "laws"
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 
@@ -114,7 +114,7 @@ def format_for_gemini_prompt(results: list) -> str:
 
 def run_tests():
     print("=" * 60)
-    print("  AI Law Coach - RAG Pipeline Test")
+    print("  AI LawAIer - RAG Pipeline Test")
     print("=" * 60)
 
     test_cases = [

@@ -1,22 +1,25 @@
 """
-AI Law Coach - FastAPI Backend v2
+LawAIer - FastAPI Backend v2
 ===================================
 New in v2:
   POST /analyze-document  — Vision reads warrants, tickets, IDs
   POST /generate-report   — post-encounter legal PDF report
 
-PRE-HACKATHON: Uses Anthropic Claude API (no special access needed)
-HACKATHON DAY: Swap commented blocks to Gemini (marked HACKATHON_DAY)
+Uses Google Gemini via Vertex AI (google-genai SDK)
 
-Run:
+Run locally:
     uvicorn main:app --reload --port 8000
+Deploy:
+    gcloud builds submit --config ../cloudbuild.yaml .
 """
 
 import os, json, base64, io
 from datetime import datetime
 from typing import Optional
 
-import httpx
+from google import genai
+from google.genai import types
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
@@ -35,24 +38,31 @@ from reportlab.platypus import (
 )
 from reportlab.lib.enums import TA_RIGHT
 
-# HACKATHON_DAY: uncomment ↓
-# from google import genai
-# from google.genai import types
+app = FastAPI(title="LawAIer API", version="2.0.0")
+_CORS_ORIGINS = ["http://localhost:3000", "http://localhost:5173"]
+_frontend_url = os.environ.get("FRONTEND_URL", "")
+if _frontend_url:
+    _CORS_ORIGINS.append(_frontend_url)
 
-app = FastAPI(title="AI Law Coach API", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173"],
+    allow_origins=_CORS_ORIGINS,
+    allow_origin_regex=r"https://.*\.run\.app",   # allow any Cloud Run URL
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # ── CONFIG ────────────────────────────────────────────────────────────────
-DB_PATH           = "./law_coach_db"
-COLLECTION_NAME   = "laws"
-EMBEDDING_MODEL   = "all-MiniLM-L6-v2"
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-# HACKATHON_DAY: GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+DB_PATH         = "./lawaier_db"
+COLLECTION_NAME = "laws"
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+GEMINI_MODEL    = "gemini-2.0-flash"
+
+PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+LOCATION   = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
+
+# Vertex AI client — same pattern as way-back-home solutions
+_genai_client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
 
 # ── ChromaDB ──────────────────────────────────────────────────────────────
 _collection = None
@@ -155,59 +165,47 @@ Output ONLY valid JSON — no markdown, no extra text:
 Nothing significant → {{"urgency":"green","suggestion":"","law":""}}"""
 
 
-# ── Unified AI caller ─────────────────────────────────────────────────────
+# ── Unified AI caller (Gemini / Vertex AI) ────────────────────────────────
 async def call_ai(system: str, messages: list[dict], max_tokens: int = 1000,
                   image_base64: str = None, media_type: str = None) -> str:
     """
-    PRE-HACKATHON: Anthropic Claude (text + vision)
-    HACKATHON_DAY: replace with google-genai SDK (see comments)
+    Calls Gemini via Vertex AI using google-genai SDK.
+    Matches the pattern used across all way-back-home solutions.
     """
-    msg_list = list(messages)
+    # Build the user text from the last message
+    last_msg = messages[-1] if messages else {}
+    user_text = last_msg.get("content", "") if isinstance(last_msg.get("content"), str) else ""
+
+    config = types.GenerateContentConfig(
+        system_instruction=system,
+        max_output_tokens=max_tokens,
+    )
 
     if image_base64 and media_type:
-        last = msg_list[-1]
-        last_text = last["content"] if isinstance(last["content"], str) else ""
-        msg_list[-1] = {
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_base64}},
-                {"type": "text",  "text": last_text}
-            ]
-        }
-
-    # ── PRE-HACKATHON ─────────────────────────────────────────────────────
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01",
-                     "content-type": "application/json"},
-            json={"model": "claude-haiku-4-5-20251001", "max_tokens": max_tokens,
-                  "system": system, "messages": msg_list}
+        # Vision call — image/video bytes + text prompt
+        image_part = types.Part.from_bytes(
+            data=base64.b64decode(image_base64),
+            mime_type=media_type,
         )
-        data = r.json()
-        if "error" in data:
-            raise HTTPException(500, detail=str(data["error"]))
-        return data["content"][0]["text"] if data.get("content") else ""
-    # ── END PRE-HACKATHON ─────────────────────────────────────────────────
+        text_part = types.Part.from_text(text=user_text or "Analyze this document.")
+        contents = [types.Content(role="user", parts=[image_part, text_part])]
+    else:
+        # Text-only call — include conversation history
+        contents = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            text = msg.get("content", "")
+            if isinstance(text, str):
+                contents.append(
+                    types.Content(role=role, parts=[types.Part.from_text(text=text)])
+                )
 
-    # HACKATHON_DAY — TEXT:
-    # client = genai.Client(api_key=GEMINI_API_KEY)
-    # response = client.models.generate_content(
-    #     model="gemini-2.0-flash",
-    #     contents=msg_list[-1]["content"] if isinstance(msg_list[-1]["content"], str) else msg_list[-1]["content"][-1]["text"],
-    #     config=types.GenerateContentConfig(system_instruction=system, max_output_tokens=max_tokens)
-    # )
-    # return response.text
-
-    # HACKATHON_DAY — VISION:
-    # image_part = types.Part.from_bytes(data=base64.b64decode(image_base64), mime_type=media_type)
-    # text_part  = types.Part.from_text(msg_list[-1]["content"] if isinstance(msg_list[-1]["content"],str) else "Analyze this document.")
-    # response = client.models.generate_content(
-    #     model="gemini-2.0-flash",
-    #     contents=[image_part, text_part],
-    #     config=types.GenerateContentConfig(system_instruction=system, max_output_tokens=max_tokens)
-    # )
-    # return response.text
+    response = await _genai_client.aio.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=contents,
+        config=config,
+    )
+    return response.text or ""
 
 
 def _parse_json(raw: str, fallback: dict) -> dict:
@@ -503,7 +501,7 @@ Write the report JSON."""}]
         content=pdf_bytes,
         media_type="application/pdf",
         headers={"Content-Disposition":
-            f'attachment; filename="law-coach-{datetime.now().strftime("%Y%m%d-%H%M")}.pdf"'}
+            f'attachment; filename="lawaier-{datetime.now().strftime("%Y%m%d-%H%M")}.pdf"'}
     )
 
 
@@ -544,7 +542,7 @@ def _build_pdf(req: ReportRequest, assessment: dict) -> bytes:
 
     # Header
     ht = Table([[
-        Paragraph("⚖ LAW COACH AI", HEADER),
+        Paragraph("⚖ LAWAIER AI", HEADER),
         Paragraph(f'<font color="#{rc.hexval()[2:]}">● {risk.upper()} RISK</font>',
                   S("r", fontSize=13, fontName="Helvetica-Bold", textColor=rc, alignment=TA_RIGHT))
     ]], colWidths=[4.5*inch, 2.5*inch])
@@ -654,9 +652,9 @@ def _build_pdf(req: ReportRequest, assessment: dict) -> bytes:
                 f'<font color="#9ca3af">[{t.get("ts","")}]</font>  "{t.get("text","")}"', SMALL))
 
     story += [Spacer(1,14), HRFlowable(width="100%",thickness=0.5,color=MGRAY,spaceAfter=5),
-              Paragraph(f"LEGAL DISCLAIMER: This report is generated by AI Law Coach for informational purposes only. "
+              Paragraph(f"LEGAL DISCLAIMER: This report is generated by LawAIer for informational purposes only. "
                         f"It does not constitute legal advice. Always consult a licensed attorney. "
-                        f"Generated: {now.strftime('%B %d, %Y at %I:%M %p')} | AI Law Coach v2.0", DISCLAIM)]
+                        f"Generated: {now.strftime('%B %d, %Y at %I:%M %p')} | LawAIer v2.0", DISCLAIM)]
 
     doc.build(story)
     return buf.getvalue()
@@ -684,7 +682,7 @@ async def analyze_video(req: VideoAnalysisRequest):
       - Recommended actions
 
     PRE-HACKATHON: Claude vision (supports video via base64)
-    HACKATHON_DAY: Gemini Flash — native video understanding, better timestamps
+    Gemini natively handles video — full native video understanding with timestamps
     """
     laws    = query_laws(req.description, req.state, req.situation)
     law_ctx = "\n".join([f"- {l['title']}: {l['actionable_response']}" for l in laws])
@@ -741,8 +739,7 @@ Respond ONLY with this JSON (no markdown):
 
     msgs = [{"role":"user","content":"Please analyze this video footage of the encounter."}]
 
-    # For video, we send as image type since Claude handles video frames
-    # HACKATHON_DAY: Gemini natively handles video — just pass video/mp4 directly
+    # Gemini natively handles video/mp4 — pass base64 bytes with correct mime_type
     raw = await call_ai(system, msgs, max_tokens=1500,
                         image_base64=req.video_base64, media_type=req.media_type)
 
