@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
-const API_BASE = "http://localhost:9999";
+const API_BASE = "http://localhost:8000";
 
 // ── Constants ─────────────────────────────────────────────────────────────
 const SITUATIONS = [
@@ -21,6 +21,125 @@ const DOC_LABELS = {
   summons:"Summons", traffic_ticket:"Traffic Ticket", notice:"Notice",
   id_document:"ID Document", other:"Document",
 };
+
+// ── Lawyer database by situation + state ──────────────────────────────────
+const LAWYERS_DB = {
+  traffic_stop: {
+    NY: [
+      { name:"David Ziff", firm:"Ziff Law Group", specialty:"Traffic & DWI Defense", years:18, rating:4.9, reviews:312, email:"dziff@zifflawgroup.com", phone:"(212) 555-0192", location:"Manhattan, NY", badge:"Super Lawyers 2024", free_consult:true },
+      { name:"Scott Bonanno", firm:"Bonanno Law", specialty:"Traffic Violations & License Suspension", years:14, rating:4.8, reviews:228, email:"scott@bonannolawny.com", phone:"(718) 555-0147", location:"Brooklyn, NY", badge:"10+ Years NYC Traffic Defense", free_consult:true },
+      { name:"Michael Villanueva", firm:"Villanueva & Associates", specialty:"Traffic Tickets & Points Reduction", years:9, rating:4.7, reviews:189, email:"mv@villalawny.com", phone:"(646) 555-0183", location:"Queens, NY", badge:"Former Traffic Court Prosecutor", free_consult:false },
+    ],
+    CA: [
+      { name:"Paul Burglin", firm:"Burglin Law Offices", specialty:"DUI & Traffic Defense", years:24, rating:4.9, reviews:445, email:"pb@burglinlaw.com", phone:"(415) 555-0134", location:"San Francisco, CA", badge:"AV Preeminent Rated", free_consult:true },
+      { name:"Lawrence Taylor", firm:"Taylor & Taylor", specialty:"DUI Defense & Traffic Law", years:31, rating:4.8, reviews:601, email:"lt@taylorduilaw.com", phone:"(310) 555-0167", location:"Los Angeles, CA", badge:"Founding Member CA DUI Lawyers Assoc", free_consult:true },
+      { name:"Erin Gerstenzang", firm:"Gerstenzang Law", specialty:"Traffic Violations & License Issues", years:12, rating:4.7, reviews:203, email:"eg@gerstenzanglaw.com", phone:"(650) 555-0121", location:"Palo Alto, CA", badge:"Rising Star 2023", free_consult:false },
+    ],
+    TX: [
+      { name:"Mark Thiessen", firm:"Thiessen Law Firm", specialty:"Traffic & DWI Defense", years:20, rating:4.9, reviews:387, email:"mt@thiessenlawfirm.com", phone:"(713) 555-0155", location:"Houston, TX", badge:"Board Certified Criminal Law", free_consult:true },
+      { name:"Tyler Flood", firm:"Tyler Flood & Associates", specialty:"DWI & Traffic Defense", years:16, rating:4.8, reviews:294, email:"tf@tylerflood.com", phone:"(713) 555-0178", location:"Houston, TX", badge:"Former DWI Prosecutor", free_consult:true },
+      { name:"Jed Silverman", firm:"Silverman Law Office", specialty:"Traffic Tickets & License Defense", years:11, rating:4.7, reviews:167, email:"js@silvermanlawoffice.com", phone:"(214) 555-0139", location:"Dallas, TX", badge:"Texas Criminal Defense Lawyers Assoc", free_consult:false },
+    ],
+    FL: [
+      { name:"Kevin J. Kulik", firm:"Kevin J. Kulik P.A.", specialty:"Traffic & Criminal Defense", years:22, rating:4.9, reviews:356, email:"kk@kevinkulik.com", phone:"(954) 555-0144", location:"Fort Lauderdale, FL", badge:"AV Rated Martindale-Hubbell", free_consult:true },
+      { name:"Joni Jacobs", firm:"Jacobs Law Group", specialty:"Traffic Violations & DUI", years:15, rating:4.8, reviews:211, email:"jj@jacobslawfl.com", phone:"(305) 555-0162", location:"Miami, FL", badge:"Florida Bar Traffic Law Committee", free_consult:true },
+      { name:"Adam Rossen", firm:"Rossen Law Firm", specialty:"DUI & Traffic Defense", years:13, rating:4.7, reviews:198, email:"ar@rossenlawfirm.com", phone:"(954) 555-0118", location:"Boca Raton, FL", badge:"Super Lawyers Rising Star", free_consult:false },
+    ],
+  },
+  arrest: {
+    NY: [
+      { name:"Benjamin Brafman", firm:"Brafman & Associates", specialty:"Criminal Defense", years:40, rating:5.0, reviews:892, email:"bb@braflaw.com", phone:"(212) 555-0101", location:"Manhattan, NY", badge:"Top 100 Trial Lawyers", free_consult:false },
+      { name:"Gerald Lefcourt", firm:"Lefcourt Criminal Defense", specialty:"Federal & State Criminal Defense", years:35, rating:4.9, reviews:634, email:"gl@lefcourtlaw.com", phone:"(212) 555-0188", location:"Manhattan, NY", badge:"NACDL Past President", free_consult:false },
+      { name:"Dawn Florio", firm:"Florio Law Offices", specialty:"Criminal Defense & Civil Rights", years:20, rating:4.8, reviews:312, email:"df@floriolaw.com", phone:"(212) 555-0177", location:"New York, NY", badge:"Former Prosecutor", free_consult:true },
+    ],
+    CA: [
+      { name:"Mark Geragos", firm:"Geragos & Geragos", specialty:"High-Profile Criminal Defense", years:32, rating:4.9, reviews:756, email:"mg@geragos.com", phone:"(213) 555-0145", location:"Los Angeles, CA", badge:"Named Top 10 Criminal Lawyers", free_consult:false },
+      { name:"Harland Braun", firm:"Braun & Braun", specialty:"Criminal Defense", years:38, rating:4.8, reviews:512, email:"hb@braunlaw.com", phone:"(213) 555-0133", location:"Los Angeles, CA", badge:"Fellow American College of Trial Lawyers", free_consult:false },
+      { name:"Alex Coolman", firm:"Coolman Defense", specialty:"Criminal Defense & Civil Rights", years:14, rating:4.7, reviews:203, email:"ac@coolmandefense.com", phone:"(415) 555-0156", location:"San Francisco, CA", badge:"ACLU Cooperating Attorney", free_consult:true },
+    ],
+    TX: [
+      { name:"Dick DeGuerin", firm:"DeGuerin & Dickson", specialty:"Criminal Defense", years:45, rating:5.0, reviews:934, email:"dd@deguerin.com", phone:"(713) 555-0102", location:"Houston, TX", badge:"Texas Criminal Defense Hall of Fame", free_consult:false },
+      { name:"Chip Lewis", firm:"Lewis & Dickson", specialty:"Criminal Defense", years:28, rating:4.9, reviews:445, email:"cl@lewisdefense.com", phone:"(713) 555-0191", location:"Houston, TX", badge:"Board Certified Criminal Law", free_consult:false },
+      { name:"Mick Mickelsen", firm:"Broden & Mickelsen", specialty:"Federal Criminal Defense", years:22, rating:4.8, reviews:334, email:"mm@brodenmickelsen.com", phone:"(214) 555-0167", location:"Dallas, TX", badge:"Former Federal Prosecutor", free_consult:true },
+    ],
+    FL: [
+      { name:"Roy Black", firm:"Black Srebnick", specialty:"Criminal Defense", years:40, rating:5.0, reviews:812, email:"rb@royblack.com", phone:"(305) 555-0103", location:"Miami, FL", badge:"Florida Bar Criminal Law Certification", free_consult:false },
+      { name:"David Oscar Markus", firm:"Markus/Moss PLLC", specialty:"Federal Criminal Defense", years:26, rating:4.9, reviews:489, email:"dom@markuslaw.com", phone:"(305) 555-0174", location:"Miami, FL", badge:"Best Lawyers in America", free_consult:false },
+      { name:"Jayne Weintraub", firm:"Weintraub & Weintraub", specialty:"Criminal Defense & Civil Rights", years:30, rating:4.8, reviews:367, email:"jw@weintraublaw.com", phone:"(305) 555-0152", location:"Miami, FL", badge:"AV Preeminent Rated", free_consult:true },
+    ],
+  },
+  immigration: {
+    NY: [
+      { name:"Michael Wildes", firm:"Wildes & Weinberg P.C.", specialty:"Immigration Law", years:30, rating:4.9, reviews:678, email:"mw@wildeslaw.com", phone:"(212) 555-0120", location:"Manhattan, NY", badge:"Former Federal Prosecutor (INS)", free_consult:true },
+      { name:"Cyrus Mehta", firm:"Cyrus D. Mehta & Partners", specialty:"Business & Family Immigration", years:28, rating:4.9, reviews:534, email:"cm@cyrusmehta.com", phone:"(212) 555-0138", location:"Manhattan, NY", badge:"AILA NY Chapter Past Chair", free_consult:false },
+      { name:"Camille Mackler", firm:"Mackler Immigration Law", specialty:"Deportation Defense & Asylum", years:15, rating:4.8, reviews:289, email:"cm@macklerimmigration.com", phone:"(718) 555-0165", location:"Brooklyn, NY", badge:"NYCLU Immigration Coalition", free_consult:true },
+    ],
+    CA: [
+      { name:"Carl Shusterman", firm:"Law Offices of Carl Shusterman", specialty:"Employment & Family Immigration", years:35, rating:4.9, reviews:823, email:"cs@shusterman.com", phone:"(213) 555-0112", location:"Los Angeles, CA", badge:"Former INS Trial Attorney", free_consult:true },
+      { name:"Bryan Johnson", firm:"Johnson Immigration Law", specialty:"Deportation Defense", years:18, rating:4.8, reviews:412, email:"bj@johnsonimmigration.com", phone:"(619) 555-0143", location:"San Diego, CA", badge:"AILA Member", free_consult:true },
+      { name:"Annaluisa Padilla", firm:"Law Offices of Annaluisa Padilla", specialty:"Immigration & Civil Rights", years:22, rating:4.8, reviews:356, email:"ap@padillalaw.com", phone:"(213) 555-0159", location:"Los Angeles, CA", badge:"CAILA Board Member", free_consult:false },
+    ],
+    TX: [
+      { name:"Charles Kuck", firm:"Kuck Baxter Immigration", specialty:"Immigration Law", years:26, rating:4.9, reviews:567, email:"ck@immigrationlaw.com", phone:"(713) 555-0127", location:"Houston, TX", badge:"AILA Past National President", free_consult:true },
+      { name:"Kathleen Walker", firm:"Walker & Associates", specialty:"Immigration & Nationality Law", years:32, rating:4.8, reviews:489, email:"kw@walkerimmigration.com", phone:"(214) 555-0148", location:"Dallas, TX", badge:"State Bar of TX Immigration Law Chair", free_consult:false },
+      { name:"Grisel Ruiz", firm:"Ruiz Immigration Law", specialty:"Deportation Defense & Asylum", years:14, rating:4.7, reviews:234, email:"gr@ruizimmigration.com", phone:"(956) 555-0171", location:"McAllen, TX", badge:"CLINIC Accredited Representative", free_consult:true },
+    ],
+    FL: [
+      { name:"Grisel Alonso", firm:"Alonso Immigration Law", specialty:"Deportation Defense", years:19, rating:4.9, reviews:445, email:"ga@alonsoimmigration.com", phone:"(305) 555-0136", location:"Miami, FL", badge:"Florida Bar Immigration Certification", free_consult:true },
+      { name:"Matthew Kolken", firm:"Kolken & Kolken", specialty:"Immigration Litigation", years:21, rating:4.8, reviews:378, email:"mk@kolkenlaw.com", phone:"(954) 555-0153", location:"Fort Lauderdale, FL", badge:"Super Lawyers 2024", free_consult:false },
+      { name:"Claudia Cañizares", firm:"NewUs Immigration", specialty:"Family & Asylum Immigration", years:16, rating:4.7, reviews:267, email:"cc@newusimmigration.com", phone:"(305) 555-0169", location:"Miami, FL", badge:"AILA South Florida Chapter", free_consult:true },
+    ],
+  },
+  search: {
+    NY: [
+      { name:"Ronald Kuby", firm:"Kuby Law Office", specialty:"Civil Rights & Criminal Defense", years:33, rating:4.9, reviews:445, email:"rk@kubylaw.com", phone:"(212) 555-0114", location:"Manhattan, NY", badge:"NYCLU Board Member", free_consult:true },
+      { name:"Lamis Deek", firm:"Deek Law", specialty:"Civil Rights & Search/Seizure", years:14, rating:4.8, reviews:234, email:"ld@deeklaw.com", phone:"(718) 555-0182", location:"Brooklyn, NY", badge:"NLG NY Chapter", free_consult:true },
+      { name:"Robert Caliendo", firm:"Caliendo Law", specialty:"Criminal Defense & 4th Amendment", years:18, rating:4.7, reviews:189, email:"rc@caliendolaw.com", phone:"(212) 555-0106", location:"New York, NY", badge:"Former Manhattan ADA", free_consult:false },
+    ],
+    CA: [
+      { name:"Michael Rehm", firm:"Rehm Law", specialty:"Civil Rights & Search/Seizure", years:16, rating:4.8, reviews:267, email:"mr@rehmlaw.com", phone:"(415) 555-0123", location:"San Francisco, CA", badge:"ACLU Cooperating Attorney", free_consult:true },
+      { name:"Peter Bibring", firm:"ACLU of Southern California", specialty:"Civil Rights & Police Misconduct", years:20, rating:4.9, reviews:389, email:"pb@aclusocal.org", phone:"(213) 555-0141", location:"Los Angeles, CA", badge:"ACLU Staff Attorney", free_consult:true },
+      { name:"John Raphling", firm:"Raphling Defense", specialty:"Criminal Defense & Search Law", years:22, rating:4.8, reviews:312, email:"jr@raphlingdefense.com", phone:"(213) 555-0158", location:"Los Angeles, CA", badge:"Former Public Defender", free_consult:false },
+    ],
+    TX: [
+      { name:"Brian Wice", firm:"Wice Law Group", specialty:"Criminal Defense & Civil Rights", years:29, rating:4.9, reviews:412, email:"bw@wicelaw.com", phone:"(713) 555-0116", location:"Houston, TX", badge:"Board Certified Criminal Law", free_consult:false },
+      { name:"Toby Shook", firm:"Shook & Associates", specialty:"Criminal Defense & Search/Seizure", years:24, rating:4.8, reviews:334, email:"ts@shooklaw.com", phone:"(214) 555-0137", location:"Dallas, TX", badge:"Former Dallas County Prosecutor", free_consult:true },
+      { name:"Stan Schwieger", firm:"Schwieger Defense", specialty:"4th Amendment & Drug Crimes", years:17, rating:4.7, reviews:223, email:"ss@schwiegerlawyer.com", phone:"(512) 555-0164", location:"Austin, TX", badge:"TCDLA Member", free_consult:true },
+    ],
+    FL: [
+      { name:"Daniel Aaronson", firm:"Aaronson Law Group", specialty:"Civil Rights & Search/Seizure", years:27, rating:4.9, reviews:378, email:"da@aaronsonlaw.com", phone:"(954) 555-0129", location:"Fort Lauderdale, FL", badge:"Florida Bar Criminal Law Board Certified", free_consult:false },
+      { name:"Jacqueline Goodman", firm:"Goodman Law", specialty:"Criminal Defense & Civil Rights", years:19, rating:4.8, reviews:256, email:"jg@goodmanlawfl.com", phone:"(305) 555-0146", location:"Miami, FL", badge:"NACDL Member", free_consult:true },
+      { name:"Brian Tannebaum", firm:"Tannebaum Weiss", specialty:"Criminal Defense", years:23, rating:4.7, reviews:289, email:"bt@tannebaumweiss.com", phone:"(305) 555-0173", location:"Miami, FL", badge:"Florida Bar Past Criminal Law Chair", free_consult:false },
+    ],
+  },
+  interrogation: {
+    NY: [
+      { name:"Barry Scheck", firm:"Innocence Project / Neufeld Scheck", specialty:"Criminal Defense & False Confessions", years:38, rating:5.0, reviews:723, email:"bs@neufeldschecklaw.com", phone:"(212) 555-0108", location:"Manhattan, NY", badge:"Innocence Project Co-Founder", free_consult:false },
+      { name:"Susan Kellman", firm:"Kellman Law", specialty:"Federal Criminal Defense", years:30, rating:4.9, reviews:489, email:"sk@kellmanlaw.com", phone:"(212) 555-0125", location:"Manhattan, NY", badge:"NACDL Board Member", free_consult:false },
+      { name:"Jennifer Louis-Jeune", firm:"Louis-Jeune Law", specialty:"Criminal Defense & Civil Rights", years:12, rating:4.8, reviews:212, email:"jlj@louisjeunelaw.com", phone:"(347) 555-0187", location:"Brooklyn, NY", badge:"Public Defender Alumni", free_consult:true },
+    ],
+    CA: [
+      { name:"Shawn Holley", firm:"Kinsella Weitzman", specialty:"Criminal Defense", years:28, rating:4.9, reviews:534, email:"sh@kwikalaw.com", phone:"(310) 555-0119", location:"Los Angeles, CA", badge:"Super Lawyers Top 100", free_consult:false },
+      { name:"Noel Stern", firm:"Stern Defense Group", specialty:"Criminal Defense & Interrogation Rights", years:20, rating:4.8, reviews:334, email:"ns@sterndefensegroup.com", phone:"(415) 555-0142", location:"San Francisco, CA", badge:"Former DA Investigator", free_consult:true },
+      { name:"James Spertus", firm:"Spertus Landes & Umhofer", specialty:"White Collar & Criminal Defense", years:24, rating:4.8, reviews:378, email:"js@spertuslaw.com", phone:"(310) 555-0166", location:"Los Angeles, CA", badge:"Former Federal Prosecutor", free_consult:false },
+    ],
+    TX: [
+      { name:"Randy Schaffer", firm:"Schaffer, Freeland & Eldredge", specialty:"Criminal Defense", years:36, rating:4.9, reviews:567, email:"rs@schafferlaw.net", phone:"(713) 555-0111", location:"Houston, TX", badge:"Texas Criminal Defense Hall of Fame", free_consult:false },
+      { name:"Gary Trichter", firm:"Trichter & Murphy", specialty:"Criminal Defense & DWI", years:31, rating:4.8, reviews:445, email:"gt@trichterandmurphy.com", phone:"(713) 555-0134", location:"Houston, TX", badge:"Board Certified Criminal Law", free_consult:true },
+      { name:"Lisa Callaway", firm:"Callaway Criminal Defense", specialty:"Criminal Defense", years:16, rating:4.7, reviews:223, email:"lc@callawaydefense.com", phone:"(512) 555-0157", location:"Austin, TX", badge:"TCDLA Member", free_consult:true },
+    ],
+    FL: [
+      { name:"Bruce Fleisher", firm:"Fleisher Law", specialty:"Criminal Defense", years:33, rating:4.9, reviews:489, email:"bf@fleisherlaw.com", phone:"(305) 555-0122", location:"Miami, FL", badge:"Florida Bar Criminal Certification", free_consult:false },
+      { name:"Stacy Scheff", firm:"Scheff Law", specialty:"Criminal Defense & Civil Rights", years:18, rating:4.8, reviews:312, email:"ss@schefflaw.com", phone:"(954) 555-0149", location:"Fort Lauderdale, FL", badge:"NACDL Member", free_consult:true },
+      { name:"Hillard Haas", firm:"Haas Law Group", specialty:"Criminal Defense", years:25, rating:4.7, reviews:267, email:"hh@haaslawgroup.com", phone:"(407) 555-0176", location:"Orlando, FL", badge:"Florida Association Criminal Defense Lawyers", free_consult:false },
+    ],
+  },
+};
+
+function getLawyers(situation, state) {
+  const byState = LAWYERS_DB[situation] || {};
+  return byState[state] || byState["NY"] || [];
+}
 
 // ── API helpers ───────────────────────────────────────────────────────────
 const post = (url, body) =>
@@ -95,6 +214,8 @@ export default function App() {
   // Report state
   const [reportLoading, setReportLoading] = useState(false);
   const [reportReady,   setReportReady]   = useState(false);
+  const [showLawyers,   setShowLawyers]   = useState(false);
+  const pdfBlobRef = useRef(null);
 
   const feedEndRef = useRef(null);
 
@@ -222,6 +343,7 @@ export default function App() {
         transcript, suggestions, doc_findings: docFindings,
         duration_seconds: startTime ? Math.floor((Date.now() - startTime) / 1000) : 0,
       });
+      pdfBlobRef.current = blob;
       const url  = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href     = url;
@@ -229,8 +351,38 @@ export default function App() {
       link.click();
       URL.revokeObjectURL(url);
       setReportReady(true);
+      setShowLawyers(true);
     } catch { setError("Report generation failed — is backend running?"); }
     setReportLoading(false);
+  }
+
+  function contactLawyer(lawyer) {
+    const sitLabel = situation?.replace(/_/g," ") || "legal";
+    const subject  = encodeURIComponent(`Legal Assistance Needed — ${sitLabel} in ${stateCode}`);
+    const body     = encodeURIComponent(
+`Dear ${lawyer.name},
+
+I am reaching out regarding a recent ${sitLabel} encounter in ${stateCode} and am seeking legal representation.
+
+Situation summary: ${description}
+
+I have attached a detailed incident report generated by AI Law Coach which includes:
+- Full encounter timeline
+- Rights invoked during the encounter
+- AI coaching suggestions provided
+- Any documents scanned during the encounter
+- Recommended next steps
+
+Please find the report attached. I would appreciate the opportunity to discuss my case with you.
+
+Thank you for your time.
+
+[Your Name]
+[Your Phone Number]`
+    );
+    // Opens default mail client with pre-filled draft
+    // User attaches the PDF manually (browsers can't auto-attach files to mailto)
+    window.location.href = `mailto:${lawyer.email}?subject=${subject}&body=${body}`;
   }
 
   function reset() {
@@ -461,7 +613,43 @@ export default function App() {
               </button>
             </div>
 
-            <button style={C.primBtn(false)} onClick={reset} className="pb" style2={{marginTop:12}}>
+            {/* LAWYER FINDER */}
+            {showLawyers && (
+              <div style={{marginBottom:20}}>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
+                  <div>
+                    <div style={{fontSize:14,fontWeight:700,letterSpacing:.5,color:"#e8e6df",marginBottom:3}}>
+                      ⚖️ RECOMMENDED LAWYERS
+                    </div>
+                    <div style={{fontSize:11,color:"#6b7280"}}>
+                      {situation?.replace(/_/g," ")} specialists · {stateCode} · Sorted by rating
+                    </div>
+                  </div>
+                  <button onClick={()=>setShowLawyers(false)}
+                    style={{background:"none",border:"none",color:"#4b5563",cursor:"pointer",fontSize:13,
+                      fontFamily:"'DM Mono',monospace"}}>
+                    hide ✕
+                  </button>
+                </div>
+                {getLawyers(situation, stateCode).map((l,i) => (
+                  <LawyerCard key={i} lawyer={l} onContact={()=>contactLawyer(l)} />
+                ))}
+                <div style={{fontSize:10,color:"#374151",textAlign:"center",marginTop:8}}>
+                  ℹ️ Lawyer profiles are illustrative examples. Verify credentials independently.
+                </div>
+              </div>
+            )}
+
+            {!showLawyers && reportReady && (
+              <button onClick={()=>setShowLawyers(true)}
+                style={{width:"100%",padding:14,background:"#0f1118",border:"1px solid #2a2d45",
+                  borderRadius:8,color:"#9ca3af",fontSize:13,fontWeight:700,cursor:"pointer",
+                  fontFamily:"'DM Mono',monospace",marginBottom:16}}>
+                ⚖️ FIND A LAWYER FOR MY SITUATION
+              </button>
+            )}
+
+            <button style={{...C.primBtn(false), marginTop:0}} onClick={reset} className="pb">
               START NEW SESSION
             </button>
 
@@ -747,6 +935,78 @@ function ErrBar({ msg }) {
   );
 }
 
+function LawyerCard({ lawyer: l, onContact }) {
+  const stars = Math.round(l.rating);
+  return (
+    <div className="lc" style={{background:"#0f1118",border:"1px solid #1e2030",borderRadius:12,
+      padding:"16px 18px",marginBottom:12,transition:"all .2s"}}>
+
+      {/* Top row */}
+      <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:10}}>
+        <div style={{flex:1}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
+            <span style={{fontSize:14,fontWeight:700,color:"#e8e6df"}}>{l.name}</span>
+            {l.free_consult && (
+              <span style={{background:"rgba(0,229,118,0.15)",border:"1px solid #00e576",
+                borderRadius:3,padding:"1px 6px",fontSize:9,fontWeight:700,color:"#00e576",letterSpacing:.5}}>
+                FREE CONSULT
+              </span>
+            )}
+          </div>
+          <div style={{fontSize:12,color:"#6b7280",marginBottom:2}}>{l.firm}</div>
+          <div style={{fontSize:11,color:"#a5b4fc",marginBottom:4}}>{l.specialty}</div>
+        </div>
+
+        {/* Rating */}
+        <div style={{textAlign:"center",marginLeft:14,flexShrink:0}}>
+          <div style={{fontSize:22,fontWeight:700,color:"#ffb300",lineHeight:1}}>{l.rating}</div>
+          <div style={{fontSize:12,color:"#ffb300",letterSpacing:2}}>
+            {"★".repeat(stars)}{"☆".repeat(5-stars)}
+          </div>
+          <div style={{fontSize:9,color:"#4b5563",marginTop:2}}>{l.reviews} reviews</div>
+        </div>
+      </div>
+
+      {/* Meta row */}
+      <div style={{display:"flex",gap:16,marginBottom:12,flexWrap:"wrap"}}>
+        <div style={{display:"flex",alignItems:"center",gap:5}}>
+          <span style={{fontSize:12}}>📍</span>
+          <span style={{fontSize:11,color:"#6b7280"}}>{l.location}</span>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:5}}>
+          <span style={{fontSize:12}}>⚖️</span>
+          <span style={{fontSize:11,color:"#6b7280"}}>{l.years} years experience</span>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:5}}>
+          <span style={{fontSize:12}}>📞</span>
+          <span style={{fontSize:11,color:"#6b7280"}}>{l.phone}</span>
+        </div>
+      </div>
+
+      {/* Badge */}
+      <div style={{background:"#1a1d2e",borderRadius:6,padding:"6px 10px",
+        fontSize:11,color:"#9ca3af",marginBottom:12,display:"inline-block"}}>
+        🏅 {l.badge}
+      </div>
+
+      {/* Contact button */}
+      <div>
+        <button onClick={onContact}
+          style={{width:"100%",padding:"11px",background:"#4f6ef7",border:"none",borderRadius:8,
+            color:"#fff",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"'DM Mono',monospace",
+            display:"flex",alignItems:"center",justifyContent:"center",gap:8,letterSpacing:.5,
+            transition:"all .2s"}}>
+          <span>✉️</span>
+          CONTACT — SEND REPORT AS EMAIL
+        </button>
+        <div style={{fontSize:10,color:"#374151",textAlign:"center",marginTop:5}}>
+          Opens mail app with pre-filled draft · Attach the downloaded PDF manually
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Fallback client-side laws if backend offline
 function fallbackLaws(situation, state) {
   const F=[
@@ -843,4 +1103,5 @@ body{background:#08090d;}
 .cb:hover,.sb:hover{filter:brightness(1.15);}
 .pb:not(:disabled):hover{filter:brightness(1.1);transform:translateY(-1px);}
 .lbtn:hover{border-color:#4f6ef7 !important;color:#a5b4fc !important;}
+.lc:hover{border-color:#2a2d45 !important;transform:translateY(-1px);box-shadow:0 4px 20px rgba(0,0,0,0.3);}
 `;
