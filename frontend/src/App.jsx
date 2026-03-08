@@ -43,6 +43,12 @@ const URGENCY = {
   green:  { bg:P.greenBg, border:P.greenBd, text:P.green, label:"You're OK", icon:"🟢" },
 };
 
+const SPEAKER_META = {
+  officer: { label:"Officer", color:"#b91c1c", bg:"#fee2e2" },
+  you:     { label:"You",     color:"#1d4ed8", bg:"#dbeafe" },
+  system:  { label:"System",  color:"#64748b", bg:"#f1f5f9" },
+};
+
 const DOC_LABELS = {
   judicial_warrant:"Judicial Warrant", administrative_warrant:"Admin Warrant",
   summons:"Summons", traffic_ticket:"Traffic Ticket",
@@ -183,6 +189,38 @@ const apiGenerateReport  = (body) =>
   fetch(`${API_BASE}/generate-report`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) })
     .then(r => { if(!r.ok) throw new Error(`${r.status}`); return r.blob(); });
 
+// ─── Audio recorder hook ───────────────────────────────────────────────────
+function useRecorder() {
+  const [audioUrl, setAudioUrl] = useState(null);
+  const chunks = useRef([]);
+  const recRef = useRef(null);
+
+  const start = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mr = new MediaRecorder(stream);
+      chunks.current = [];
+      mr.ondataavailable = e => { if (e.data.size > 0) chunks.current.push(e.data); };
+      mr.onstop = () => {
+        const blob = new Blob(chunks.current, { type: "audio/webm" });
+        setAudioUrl(URL.createObjectURL(blob));
+        stream.getTracks().forEach(t => t.stop());
+      };
+      mr.start(1000); // collect chunks every 1s
+      recRef.current = mr;
+    } catch { /* mic permission denied or unavailable */ }
+  }, []);
+
+  const stop = useCallback(() => {
+    if (recRef.current && recRef.current.state !== "inactive") recRef.current.stop();
+    recRef.current = null;
+  }, []);
+
+  const reset = useCallback(() => { setAudioUrl(null); chunks.current = []; }, []);
+
+  return { audioUrl, start, stop, reset };
+}
+
 // ─── Speech hook ───────────────────────────────────────────────────────────
 function useSpeech(onResult) {
   const ref = useRef(null);
@@ -236,8 +274,10 @@ export default function App() {
   // Lawyers
   const [showLawyers, setShowLawyers] = useState(false);
 
-  // Results tab: "suggestions" | "document" | "video" | "lawyers"
+  // Results tab: "suggestions" | "transcript" | "document" | "video" | "lawyers"
   const [activeTab, setActiveTab] = useState("suggestions");
+
+  const { audioUrl, start: startRecording, stop: stopRecording, reset: resetRecording } = useRecorder();
 
   const feedEndRef = useRef(null);
   useEffect(() => { feedEndRef.current?.scrollIntoView({ behavior:"smooth" }); }, [suggestions]);
@@ -248,8 +288,7 @@ export default function App() {
   // ── Speech ──────────────────────────────────────────────────────────────
   const handleSpeech = useCallback(async (text) => {
     const ts = new Date().toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
-    setTranscript(p => [...p, { text, ts }]);
-    const msg = { role:"user", content:`Other party said: "${text}"` };
+    const msg = { role:"user", content:`Spoken: "${text}"` };
     const h2  = [...history, msg];
     setHistory(h2);
     if (isThinking) return;
@@ -257,11 +296,16 @@ export default function App() {
     setError(null);
     try {
       const res = await apiAnalyze(text, situation, stateCode, description, h2);
+      const speaker = res.speaker || "officer";
+      setTranscript(p => [...p, { text, ts, speaker }]);
       if (res.suggestion) {
         setHistory(p => [...p, { role:"assistant", content:JSON.stringify(res) }]);
         setSuggestions(p => [...p, { ...res, id:Date.now(), time:ts, trigger:text }]);
       }
-    } catch { setError("Analysis failed — check backend is running."); }
+    } catch {
+      setTranscript(p => [...p, { text, ts, speaker: "officer" }]);
+      setError("Analysis failed — check backend is running.");
+    }
     setIsThinking(false);
   }, [situation, stateCode, description, history, isThinking]);
 
@@ -278,15 +322,31 @@ export default function App() {
     setPreparing(true); setError(null);
     try { await apiPrepare(situation, stateCode, description); } catch { /* fallback ok */ }
     setPreparing(false);
-    setSuggestions([]); setTranscript([]); setHistory([]);
+
+    const ts = new Date().toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+    const announcement = "This conversation is now being recorded for your safety and legal protection.";
+    setSuggestions([]);
+    setHistory([]);
     setDocFindings([]); setScanResult(null); setVideoResult(null);
+    resetRecording();
+    setTranscript([{ text: announcement, ts, speaker: "system" }]);
     setStartTime(Date.now());
+
+    // Announce via text-to-speech
+    if (window.speechSynthesis) {
+      const utt = new SpeechSynthesisUtterance(announcement);
+      utt.rate = 0.95;
+      window.speechSynthesis.speak(utt);
+    }
+
+    startRecording();
     startSpeech();
     setScreen("s3_listening");
   }
 
   function stopListening() {
     stopSpeech();
+    stopRecording();
     setScreen("s4_results");
     setActiveTab("suggestions");
   }
@@ -296,6 +356,7 @@ export default function App() {
     setSuggestions([]); setTranscript([]); setHistory([]);
     setDocFindings([]); setScanResult(null);
     setVideoResult(null); setVideoName("");
+    resetRecording();
     setError(null); setReportReady(false); setShowLawyers(false);
     setScreen("s1_situation");
   }
@@ -531,13 +592,17 @@ Thank you,
 
             {transcript.length > 0 && (
               <div style={s.transcriptBox}>
-                <div style={s.transcriptLabel}>Transcript</div>
-                {transcript.slice(-4).map((t,i) => (
-                  <div key={i} style={s.transcriptLine}>
-                    <span style={s.transcriptTime}>{t.ts}</span>
-                    <span style={{color:P.slate}}>"{t.text}"</span>
-                  </div>
-                ))}
+                <div style={s.transcriptLabel}>Live Transcript</div>
+                {transcript.slice(-5).map((t,i) => {
+                  const sp = SPEAKER_META[t.speaker] || SPEAKER_META.officer;
+                  return (
+                    <div key={i} style={s.transcriptLine}>
+                      <span style={s.transcriptTime}>{t.ts}</span>
+                      <span style={{...s.speakerBadge, background: sp.bg, color: sp.color}}>{sp.label}</span>
+                      <span style={{color:P.slate, flex:1}}>&ldquo;{t.text}&rdquo;</span>
+                    </div>
+                  );
+                })}
               </div>
             )}
 
@@ -606,6 +671,24 @@ Thank you,
                   : <span style={s.actionCta}>{reportReady?"Download Again →":"Generate PDF →"}</span>}
               </button>
 
+              {/* Download Recording */}
+              {audioUrl ? (
+                <a href={audioUrl} download={`lawaier-recording-${Date.now()}.webm`}
+                  style={{...s.actionCard, textDecoration:"none"}} className="actionCard">
+                  <span style={s.actionIcon}>🎙</span>
+                  <span style={s.actionTitle}>Download Recording</span>
+                  <span style={s.actionDesc}>Audio recording of the full encounter saved to your device</span>
+                  <span style={s.actionCta}>Save Audio →</span>
+                </a>
+              ) : (
+                <div style={{...s.actionCard, opacity:0.4, cursor:"default"}}>
+                  <span style={s.actionIcon}>🎙</span>
+                  <span style={s.actionTitle}>Recording</span>
+                  <span style={s.actionDesc}>Audio recording was not available (mic permission required)</span>
+                  <span style={s.actionCta}>Not available</span>
+                </div>
+              )}
+
               {/* Find Lawyer */}
               <button style={s.actionCard} className="actionCard"
                 onClick={() => { setShowLawyers(p=>!p); setActiveTab("lawyers"); }}>
@@ -623,6 +706,7 @@ Thank you,
             <div style={s.tabBar}>
               {[
                 { id:"suggestions", label:`Suggestions (${suggestions.length})` },
+                { id:"transcript",  label:`Transcript (${transcript.filter(t=>t.speaker!=="system").length})` },
                 { id:"document",    label:`Documents (${docFindings.length})` },
                 { id:"video",       label:"Video Analysis" },
                 { id:"lawyers",     label:"Lawyers" },
@@ -640,6 +724,34 @@ Thank you,
                 {suggestions.length===0
                   ? <div style={s.emptyTab}>No legally significant moments were detected during this session.</div>
                   : suggestions.map(sug => <SugCard key={sug.id} s={sug} showTrigger />)}
+              </div>
+            )}
+
+            {/* Tab: Full Transcript */}
+            {activeTab==="transcript" && (
+              <div>
+                {transcript.length === 0 ? (
+                  <div style={s.emptyTab}>No speech was captured during this session.</div>
+                ) : (
+                  <div style={s.fullTranscriptBox}>
+                    {transcript.map((t, i) => {
+                      const sp = SPEAKER_META[t.speaker] || SPEAKER_META.officer;
+                      return (
+                        <div key={i} style={{
+                          display:"flex", gap:12, padding:"10px 0",
+                          borderBottom: i < transcript.length-1 ? `1px solid ${P.border}` : "none",
+                          alignItems:"flex-start",
+                        }}>
+                          <span style={{color:P.slateL, fontSize:11, flexShrink:0, paddingTop:2}}>{t.ts}</span>
+                          <span style={{...s.speakerBadge, background:sp.bg, color:sp.color, flexShrink:0}}>{sp.label}</span>
+                          <span style={{color:P.navy, fontSize:14, lineHeight:1.5}}>
+                            {t.speaker === "system" ? <em style={{color:P.slate}}>{t.text}</em> : `"${t.text}"`}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             )}
 
@@ -1041,8 +1153,10 @@ const s = {
   emptyFeed:    { textAlign:"center", padding:"48px 0", color:P.slateL },
   transcriptBox:{ background:P.white, border:`1px solid ${P.border}`, borderRadius:8, padding:"12px 14px", marginTop:8 },
   transcriptLabel:{ fontSize:10, fontWeight:600, color:P.slateL, letterSpacing:1, textTransform:"uppercase", marginBottom:8 },
-  transcriptLine: { display:"flex", gap:10, fontSize:12, marginBottom:4 },
-  transcriptTime: { color:P.slateL, flexShrink:0 },
+  transcriptLine: { display:"flex", gap:8, fontSize:12, marginBottom:6, alignItems:"flex-start" },
+  transcriptTime: { color:P.slateL, flexShrink:0, paddingTop:1 },
+  speakerBadge:   { fontSize:10, fontWeight:700, borderRadius:4, padding:"1px 6px", flexShrink:0, letterSpacing:0.3 },
+  fullTranscriptBox: { background:P.white, border:`1px solid ${P.border}`, borderRadius:8, padding:"4px 16px" },
   summaryBar:   { display:"flex", alignItems:"flex-start", justifyContent:"space-between", marginBottom:16 },
   summaryLeft:  {},
   summaryTitle: { fontSize:18, fontWeight:700, color:P.navy },

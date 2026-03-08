@@ -136,9 +136,11 @@ CONTEXT: {description}
 LAWS:
 {law_block}
 
+Also classify who spoke: "officer" if this sounds like law enforcement (commands, requests for ID, stating charges, asking you to step out, etc.), "you" if it sounds like the detained person (responses, questions about rights, protests).
+
 Output ONLY valid JSON — no markdown, no extra text:
-{{"urgency":"red|yellow|green","suggestion":"1 sentence max","law":"law name"}}
-Nothing significant → {{"urgency":"green","suggestion":"","law":""}}"""
+{{"urgency":"red|yellow|green","suggestion":"1 sentence max","law":"law name","speaker":"officer|you"}}
+Nothing significant → {{"urgency":"green","suggestion":"","law":"","speaker":"officer"}}"""
 
 
 # ── Unified AI caller (Gemini / Vertex AI) ────────────────────────────────
@@ -305,9 +307,10 @@ async def analyze(req: AnalyzeRequest):
     system  = build_system_prompt(laws, req.situation, req.state, req.description)
     msgs    = req.conversation_history + [{"role":"user","content": f'They said: "{req.spoken_text}". JSON only.'}]
     raw     = await call_ai(system, msgs, max_tokens=200)
-    result  = _parse_json(raw, {"urgency":"green","suggestion":"","law":""})
+    result  = _parse_json(raw, {"urgency":"green","suggestion":"","law":"","speaker":"officer"})
     return {"urgency": result.get("urgency","green"), "suggestion": result.get("suggestion",""),
-            "law": result.get("law",""), "laws_used": [l["title"] for l in laws[:2]]}
+            "law": result.get("law",""), "speaker": result.get("speaker","officer"),
+            "laws_used": [l["title"] for l in laws[:2]]}
 
 
 # ── Vision Document Analysis + Points Calculator ─────────────────────────
