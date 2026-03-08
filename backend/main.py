@@ -26,9 +26,6 @@ from fastapi.responses import Response, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-import chromadb
-from chromadb.utils import embedding_functions
-
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import inch
@@ -54,10 +51,7 @@ app.add_middleware(
 )
 
 # ── CONFIG ────────────────────────────────────────────────────────────────
-DB_PATH         = "./lawaier_db"
-COLLECTION_NAME = "laws"
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
-GEMINI_MODEL    = "gemini-2.0-flash"
+GEMINI_MODEL = "gemini-2.0-flash"
 
 PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
 LOCATION   = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
@@ -65,16 +59,15 @@ LOCATION   = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
 # Vertex AI client — same pattern as way-back-home solutions
 _genai_client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
 
-# ── ChromaDB ──────────────────────────────────────────────────────────────
-_collection = None
+# ── Laws DB (loaded once) ─────────────────────────────────────────────────
+_laws_cache: list[dict] = []
 
-def get_collection():
-    global _collection
-    if _collection is None:
-        client = chromadb.PersistentClient(path=DB_PATH)
-        ef = embedding_functions.SentenceTransformerEmbeddingFunction(model_name=EMBEDDING_MODEL)
-        _collection = client.get_collection(COLLECTION_NAME, embedding_function=ef)
-    return _collection
+def get_laws() -> list[dict]:
+    global _laws_cache
+    if not _laws_cache:
+        with open("laws_data.json") as f:
+            _laws_cache = json.load(f)
+    return _laws_cache
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────
@@ -107,44 +100,18 @@ class ReportRequest(BaseModel):
     duration_seconds: int = 0
 
 
-# ── RAG ───────────────────────────────────────────────────────────────────
+# ── Law search (keyword-based, no local ML models needed) ─────────────────
 def query_laws(query: str, state: str, situation: str, n: int = 5) -> list[dict]:
-    try:
-        col = get_collection()
-        where = {
-            "$or": [
-                {"$and": [{"state": {"$eq": state}},     {"situation": {"$eq": situation}}]},
-                {"$and": [{"state": {"$eq": "federal"}}, {"situation": {"$eq": situation}}]},
-                {"state": {"$eq": "federal"}},
-            ]
-        }
-        res = col.query(query_texts=[query], n_results=min(n, col.count()),
-                        where=where, include=["documents","metadatas","distances"])
-        return [{
-            "id":                  res["ids"][0][i],
-            "title":               res["metadatas"][0][i]["title"],
-            "law_reference":       res["metadatas"][0][i]["law_reference"],
-            "actionable_response": res["metadatas"][0][i]["actionable_response"],
-            "urgency":             res["metadatas"][0][i]["urgency"],
-            "state":               res["metadatas"][0][i]["state"],
-            "situation":           res["metadatas"][0][i]["situation"],
-            "relevance_score":     round(1 - res["distances"][0][i], 3),
-        } for i in range(len(res["ids"][0]))]
-    except Exception as e:
-        print(f"[RAG ERROR] {e}")
-        return _fallback(query, state, situation, n)
-
-def _fallback(query: str, state: str, situation: str, n: int) -> list[dict]:
-    with open("laws_data.json") as f:
-        laws = json.load(f)
+    """Keyword search over laws_data.json — lightweight, no torch/CUDA."""
+    laws = get_laws()
     q = query.lower()
     scored = []
     for law in laws:
         if law["situation"] != situation: continue
         if law["state"] not in (state, "federal"): continue
-        score = sum(2 for kw in law["keywords"] if kw.lower() in q)
+        score = sum(2 for kw in law.get("keywords", []) if kw.lower() in q)
         score += 1 if law["state"] == state else 0
-        scored.append({**law, "relevance_score": round(score/10, 2)})
+        scored.append({**law, "relevance_score": round(score / 10, 2)})
     scored.sort(key=lambda x: x["relevance_score"], reverse=True)
     return scored[:n]
 

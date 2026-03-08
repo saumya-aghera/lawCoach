@@ -1,15 +1,12 @@
-# AI LawAIer - Backend Dependencies
+# LawAIer - Backend Dependencies
+# Lightweight — no local ML models (uses Google Vertex AI for everything)
 
 # API server
 fastapi==0.115.0
 uvicorn[standard]==0.30.0
 
-# Google Gemini / Vertex AI
+# Google Gemini / Vertex AI (same as way-back-home solutions)
 google-genai>=1.0.0
-
-# RAG
-chromadb==0.5.0
-sentence-transformers==2.7.0
 
 # PDF generation
 reportlab==4.2.2

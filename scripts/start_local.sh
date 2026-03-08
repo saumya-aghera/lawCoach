@@ -44,27 +44,18 @@ source .venv/bin/activate
 uv pip install -r backend_requirements.txt --quiet
 echo -e "${GREEN}✓ Python deps ready${NC}"
 
-# ── Step 2: Build ChromaDB ────────────────────────────────────────────────────
+# ── Step 2: Build React frontend ──────────────────────────────────────────────
 echo ""
-echo -e "${BLUE}[2/4] Checking ChromaDB vector store...${NC}"
-if [ ! -d "$BACKEND/lawaier_db" ]; then
-    echo "Building ChromaDB (first run — ~2 min)..."
-    python build_chromadb.py
-fi
-echo -e "${GREEN}✓ ChromaDB ready${NC}"
-
-# ── Step 3: Build React frontend ──────────────────────────────────────────────
-echo ""
-echo -e "${BLUE}[3/4] Building React frontend...${NC}"
+echo -e "${BLUE}[2/3] Building React frontend...${NC}"
 cd "$FRONTEND"
 if [ ! -d "node_modules" ]; then npm install --silent; fi
 # API calls go to same origin — no VITE_API_URL needed (relative paths work)
 npm run build --silent
-echo -e "${GREEN}✓ Frontend built → backend/dist${NC}"
+echo -e "${GREEN}✓ Frontend built${NC}"
 
-# ── Step 4: Start server ──────────────────────────────────────────────────────
+# ── Step 3: Start server ──────────────────────────────────────────────────────
 echo ""
-echo -e "${BLUE}[4/4] Starting LawAIer...${NC}"
+echo -e "${BLUE}[3/3] Starting LawAIer...${NC}"
 echo ""
 echo -e "${GREEN}  URL → http://localhost:8080${NC}"
 echo -e "${GREEN}  API docs → http://localhost:8080/docs${NC}"
