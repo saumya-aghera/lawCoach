@@ -218,6 +218,7 @@ function useAudioCapture(onChunk) {
   const allBlobs   = useRef([]);
   const onChunkRef = useRef(onChunk);
   const timerRef   = useRef(null);
+  const mrRef      = useRef(null); // track active MediaRecorder so stop() can finalize it
   const [capturing, setCapturing] = useState(false);
   const [supported, setSupported] = useState(true);
   const [audioUrl,  setAudioUrl]  = useState(null);
@@ -231,10 +232,12 @@ function useAudioCapture(onChunk) {
     let mr;
     try { mr = new MediaRecorder(stream, { mimeType }); }
     catch { mr = new MediaRecorder(stream); }
+    mrRef.current = mr; // keep ref so stop() can finalize this recorder
 
     mr.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
 
     mr.onstop = () => {
+      mrRef.current = null;
       const blob = new Blob(chunks, { type: baseType });
       allBlobs.current.push(blob);
 
@@ -288,6 +291,8 @@ function useAudioCapture(onChunk) {
   const stop = useCallback(() => {
     activeRef.current = false;
     clearTimeout(timerRef.current);
+    // Force-stop the active recorder so mr.onstop fires and allBlobs get finalized
+    try { mrRef.current?.stop(); } catch {}
   }, []);
 
   const reset = useCallback(() => { setAudioUrl(null); allBlobs.current = []; }, []);
@@ -411,6 +416,8 @@ export default function App() {
 
   // ── Audio chunk handler — sends via WebSocket (persistent connection) ──────
   const handleChunk = useCallback((audio_base64, media_type) => {
+    // Drop chunk if TTS is currently speaking — prevents self-listening feedback loop
+    if (window.speechSynthesis?.speaking) return;
     if (isThinkingRef.current) return;
     setIsThinking(true);
     setError(null);
@@ -448,13 +455,6 @@ export default function App() {
     setTranscript([{ text: announcement, ts, speaker: "system" }]);
     setStartTime(Date.now());
 
-    // Announce via text-to-speech
-    if (window.speechSynthesis) {
-      const utt = new SpeechSynthesisUtterance(announcement);
-      utt.rate = 0.95;
-      window.speechSynthesis.speak(utt);
-    }
-
     // Open WebSocket session (replaces per-chunk HTTP POST)
     const multilingual = userLang !== "en-US";
     connectSession({
@@ -464,7 +464,15 @@ export default function App() {
       user_lang: multilingual ? userLang.split("-")[0] : "en",
     });
 
-    startCapture();    // starts MediaRecorder + audio chunk loop
+    // Announce via text-to-speech, then start recording after it finishes
+    if (window.speechSynthesis) {
+      const utt = new SpeechSynthesisUtterance(announcement);
+      utt.rate = 0.95;
+      utt.onend = () => startCapture();
+      window.speechSynthesis.speak(utt);
+    } else {
+      startCapture();
+    }
     setScreen("s3_listening");
   }
 
