@@ -13,9 +13,13 @@ Deploy:
     gcloud builds submit --config ../cloudbuild.yaml .
 """
 
-import os, json, base64, io
+import os, json, base64, io, asyncio, logging
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Optional
+
+import chromadb
+from chromadb import EmbeddingFunction, Documents
 
 from google import genai
 from google.genai import types
@@ -25,6 +29,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+log = logging.getLogger("lawaier")
 
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle
@@ -36,7 +42,14 @@ from reportlab.platypus import (
 )
 from reportlab.lib.enums import TA_RIGHT
 
-app = FastAPI(title="LawAIer API", version="2.0.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Build the ChromaDB vector store at startup so the first request is fast."""
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _build_vector_store)
+    yield
+
+app = FastAPI(title="LawAIer API", version="2.0.0", lifespan=lifespan)
 _CORS_ORIGINS = ["http://localhost:3000", "http://localhost:5173"]
 _frontend_url = os.environ.get("FRONTEND_URL", "")
 if _frontend_url:
@@ -122,9 +135,81 @@ class TranscribeAnalyzeRequest(BaseModel):
     user_lang:    str = "en"   # BCP-47 lang code prefix e.g. "hi", "es"
 
 
-# ── Law search (keyword-based, no local ML models needed) ─────────────────
+# ── Vector DB (ChromaDB + Vertex AI text-embedding-004) ───────────────────
+
+class _VertexEmbedFn(EmbeddingFunction):
+    """Synchronous embedding function that calls Vertex AI text-embedding-004."""
+    def __call__(self, input: Documents):   # type: ignore[override]
+        resp = get_client().models.embed_content(
+            model="text-embedding-004",
+            contents=list(input),
+        )
+        return [e.values for e in resp.embeddings]
+
+_chroma_collection = None
+
+def _build_vector_store():
+    """Build (or return cached) in-memory ChromaDB collection from laws_data.json."""
+    global _chroma_collection
+    if _chroma_collection is not None:
+        return _chroma_collection
+
+    laws = get_laws()
+    client = chromadb.Client()          # in-memory, no disk required
+    col = client.get_or_create_collection(
+        name="lawaier_laws",
+        embedding_function=_VertexEmbedFn(),
+        metadata={"hnsw:space": "cosine"},
+    )
+
+    # Embed document text = title + content for richer semantic signal
+    col.add(
+        ids=[l["id"] for l in laws],
+        documents=[f"{l['title']}. {l['content']}" for l in laws],
+        metadatas=[{
+            "state":               l["state"],
+            "situation":           l["situation"],
+            "urgency":             l["urgency"],
+            "title":               l["title"],
+            "law_reference":       l["law_reference"],
+            "actionable_response": l["actionable_response"],
+            "keywords":            ",".join(l.get("keywords", [])),
+        } for l in laws],
+    )
+
+    _chroma_collection = col
+    log.info("ChromaDB vector store built — %d law chunks indexed.", len(laws))
+    return col
+
+
 def query_laws(query: str, state: str, situation: str, n: int = 5) -> list[dict]:
-    """Keyword search over laws_data.json — lightweight, no torch/CUDA."""
+    """
+    Semantic search over laws_data.json via ChromaDB + Vertex AI text-embedding-004.
+    Falls back to keyword scoring if the vector store is unavailable.
+    """
+    try:
+        col = _build_vector_store()
+        search_text = query.strip() or f"{situation.replace('_', ' ')} legal rights"
+
+        results = col.query(
+            query_texts=[search_text],
+            n_results=min(n * 3, col.count()),
+            where={"$and": [
+                {"situation": {"$eq": situation}},
+                {"state":     {"$in": [state, "federal"]}},
+            ]},
+        )
+
+        laws_by_id = {l["id"]: l for l in get_laws()}
+        return [laws_by_id[lid] for lid in results["ids"][0] if lid in laws_by_id][:n]
+
+    except Exception as exc:
+        log.warning("Vector search failed (%s) — falling back to keyword search.", exc)
+        return _query_laws_keyword(query, state, situation, n)
+
+
+def _query_laws_keyword(query: str, state: str, situation: str, n: int = 5) -> list[dict]:
+    """Keyword fallback: TF-style scoring over laws_data.json."""
     laws = get_laws()
     q = query.lower()
     scored = []
