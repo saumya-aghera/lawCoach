@@ -208,72 +208,88 @@ const apiTranscribeAnalyze = (audio_base64, media_type, situation, state, descri
 
 
 // ─── Audio capture hook (Gemini-based, replaces Web Speech API) ────────────
-// Records mic in 4-second chunks → sends to /transcribe-analyze → Gemini does
-// transcription + speaker detection + translation + legal hints in one call.
-// Also accumulates all audio for post-session download.
+// FIX: We stop+restart MediaRecorder every 4s so each chunk is a COMPLETE,
+// self-contained audio file. Using timeslice(4000) produces WebM fragments —
+// only the first chunk has the header, subsequent ones are broken → Gemini 400.
 function useAudioCapture(onChunk) {
-  const mrRef       = useRef(null);
-  const streamRef   = useRef(null);
-  const activeRef   = useRef(false);
-  const allChunks   = useRef([]);        // accumulate for download
-  const onChunkRef  = useRef(onChunk);
+  const streamRef  = useRef(null);
+  const activeRef  = useRef(false);
+  const allBlobs   = useRef([]);
+  const onChunkRef = useRef(onChunk);
+  const timerRef   = useRef(null);
   const [capturing, setCapturing] = useState(false);
   const [supported, setSupported] = useState(true);
   const [audioUrl,  setAudioUrl]  = useState(null);
 
   useEffect(() => { onChunkRef.current = onChunk; }, [onChunk]);
 
+  const recordWindow = useCallback((stream, mimeType, baseType) => {
+    if (!activeRef.current) return;
+
+    const chunks = [];
+    let mr;
+    try { mr = new MediaRecorder(stream, { mimeType }); }
+    catch { mr = new MediaRecorder(stream); }
+
+    mr.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+
+    mr.onstop = () => {
+      const blob = new Blob(chunks, { type: baseType });
+      allBlobs.current.push(blob);
+
+      if (blob.size > 1500 && activeRef.current) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const b64 = reader.result.split(",")[1];
+          onChunkRef.current(b64, baseType);
+        };
+        reader.readAsDataURL(blob);
+      }
+
+      if (activeRef.current) {
+        timerRef.current = setTimeout(() => recordWindow(stream, mimeType, baseType), 100);
+      } else {
+        if (allBlobs.current.length > 0) {
+          const full = new Blob(allBlobs.current, { type: baseType });
+          setAudioUrl(URL.createObjectURL(full));
+        }
+        stream.getTracks().forEach(t => t.stop());
+        setCapturing(false);
+      }
+    };
+
+    mr.start();
+    timerRef.current = setTimeout(() => { try { mr.stop(); } catch {} }, 4000);
+  }, []);
+
   const start = useCallback(async () => {
     setAudioUrl(null);
-    allChunks.current = [];
+    allBlobs.current = [];
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
 
-      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-        ? "audio/webm;codecs=opus"
-        : MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : "audio/ogg";
+      const mimeType =
+        MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" :
+        MediaRecorder.isTypeSupported("audio/webm")             ? "audio/webm"             :
+        MediaRecorder.isTypeSupported("audio/ogg;codecs=opus")  ? "audio/ogg;codecs=opus"  :
+                                                                   "audio/ogg";
       const baseType = mimeType.split(";")[0];
 
-      const mr = new MediaRecorder(stream, { mimeType });
       activeRef.current = true;
-
-      mr.ondataavailable = (e) => {
-        if (e.data.size < 200) return;           // skip empty frames
-        allChunks.current.push(e.data);          // save for download
-        if (!activeRef.current) return;
-        const blob = new Blob([e.data], { type: baseType });
-        const reader = new FileReader();
-        reader.onload = () => {
-          const base64 = reader.result.split(",")[1];
-          onChunkRef.current(base64, baseType);
-        };
-        reader.readAsDataURL(blob);
-      };
-
-      mr.onstop = () => {
-        if (allChunks.current.length > 0) {
-          const full = new Blob(allChunks.current, { type: baseType });
-          setAudioUrl(URL.createObjectURL(full));
-        }
-        streamRef.current?.getTracks().forEach(t => t.stop());
-        setCapturing(false);
-      };
-
-      mr.start(4000);
-      mrRef.current = mr;
       setCapturing(true);
+      recordWindow(stream, mimeType, baseType);
     } catch {
       setSupported(false);
     }
-  }, []);
+  }, [recordWindow]);
 
   const stop = useCallback(() => {
     activeRef.current = false;
-    try { mrRef.current?.stop(); } catch {}
+    clearTimeout(timerRef.current);
   }, []);
 
-  const reset = useCallback(() => { setAudioUrl(null); allChunks.current = []; }, []);
+  const reset = useCallback(() => { setAudioUrl(null); allBlobs.current = []; }, []);
 
   return { capturing, supported, audioUrl, start, stop, reset };
 }
