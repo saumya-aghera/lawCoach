@@ -36,6 +36,14 @@ const SITUATIONS = [
   { id:"interrogation", icon:"💬", label:"Interrogation",   desc:"Police questioning or interview" },
 ];
 const STATES = ["NY","CA","TX","FL","Federal"];
+const LANGUAGES = [
+  { code:"en-US", label:"English" },
+  { code:"hi-IN", label:"हिंदी" },
+  { code:"es-US", label:"Español" },
+  { code:"zh-CN", label:"中文" },
+  { code:"fr-FR", label:"Français" },
+  { code:"ar-SA", label:"العربية" },
+];
 
 const URGENCY = {
   red:    { bg:P.redBg,   border:P.redBd,   text:P.red,   label:"Act Now",   icon:"🔴" },
@@ -184,20 +192,38 @@ const apiGenerateReport  = (body) =>
     .then(r => { if(!r.ok) throw new Error(`${r.status}`); return r.blob(); });
 
 // ─── Speech hook ───────────────────────────────────────────────────────────
-function useSpeech(onResult) {
-  const ref = useRef(null);
+const CONFIDENCE_THRESHOLD = 0.70; // ignore low-confidence results (ambient noise, device audio)
+const DEDUP_WINDOW_MS      = 5000; // ignore identical text within 5 seconds
+
+function useSpeech(onResult, lang = "en-US") {
+  const ref        = useRef(null);
+  const lastRef    = useRef({ text: "", ts: 0 }); // for deduplication
   const [listening, setListening] = useState(false);
   const [supported, setSupported] = useState(true);
+
   useEffect(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) { setSupported(false); return; }
     const r = new SR();
-    r.continuous = true; r.interimResults = false; r.lang = "en-US";
-    r.onresult = e => { const t = e.results[e.results.length-1][0].transcript.trim(); if(t) onResult(t); };
+    r.continuous = true; r.interimResults = false; r.lang = lang;
+    r.onresult = e => {
+      const result     = e.results[e.results.length - 1][0];
+      const text       = result.transcript.trim();
+      const confidence = result.confidence ?? 1; // some browsers omit confidence (default allow)
+      if (!text) return;
+      // Drop low-confidence captures (often device audio or background noise)
+      if (confidence < CONFIDENCE_THRESHOLD) return;
+      // Deduplicate: skip if identical text was processed very recently
+      const now = Date.now();
+      if (text === lastRef.current.text && now - lastRef.current.ts < DEDUP_WINDOW_MS) return;
+      lastRef.current = { text, ts: now };
+      onResult(text);
+    };
     r.onerror  = () => {};
     r.onend    = () => setListening(false);
     ref.current = r;
-  }, [onResult]);
+  }, [onResult, lang]);
+
   const start = useCallback(() => { ref.current?.start(); setListening(true); }, []);
   const stop  = useCallback(() => { ref.current?.stop();  setListening(false); }, []);
   return { listening, supported, start, stop };
@@ -209,6 +235,7 @@ export default function App() {
   const [screen,      setScreen]      = useState("s1_situation");
   const [situation,   setSituation]   = useState(null);
   const [stateCode,   setStateCode]   = useState(null);
+  const [langCode,    setLangCode]    = useState("en-US");
   const [description, setDescription] = useState("");
   const [suggestions, setSuggestions] = useState([]);
   const [transcript,  setTranscript]  = useState([]);
@@ -265,7 +292,7 @@ export default function App() {
     setIsThinking(false);
   }, [situation, stateCode, description, history, isThinking]);
 
-  const { listening, supported, start: startSpeech, stop: stopSpeech } = useSpeech(handleSpeech);
+  const { listening, supported, start: startSpeech, stop: stopSpeech } = useSpeech(handleSpeech, langCode);
 
   // ── Nav ─────────────────────────────────────────────────────────────────
   async function goToState() {
@@ -484,6 +511,17 @@ Thank you,
             </div>
 
             <div style={s.descSection}>
+              <label style={s.label}>Speech language</label>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}>
+                {LANGUAGES.map(l => (
+                  <button key={l.code} onClick={() => setLangCode(l.code)}
+                    style={{padding:"6px 14px",borderRadius:20,border:`1.5px solid ${langCode===l.code?P.blue:P.border}`,
+                      background:langCode===l.code?P.blueBg:P.white,color:langCode===l.code?P.blue:P.slate,
+                      fontSize:13,fontWeight:500,cursor:"pointer",fontFamily:"Inter, system-ui, sans-serif"}}>
+                    {l.label}
+                  </button>
+                ))}
+              </div>
               <label style={s.label}>Briefly describe what's happening <span style={{color:P.slateL}}>(optional)</span></label>
               <textarea style={s.textarea}
                 placeholder="e.g. Officer pulled me over on I-95, asking to search my vehicle..."
@@ -511,7 +549,7 @@ Thank you,
                   <span style={{fontSize:15,fontWeight:600,color:P.navy}}>Listening Live</span>
                   {isThinking && <span style={s.thinkingBadge}>analyzing…</span>}
                 </div>
-                <div style={s.listenSub}>{sitInfo?.label} · {stateCode}</div>
+                <div style={s.listenSub}>{sitInfo?.label} · {stateCode} · {LANGUAGES.find(l=>l.code===langCode)?.label}</div>
               </div>
               <button style={s.stopBtn} onClick={stopListening}>Stop Session</button>
             </div>
